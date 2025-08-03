@@ -135,28 +135,6 @@ def extract_text_from_pdf(path: str) -> str:
 
     return "\n".join(out)
 
-def extract_text_from_image_pdf(path: str) -> str:
-    """OCR a scanned-PDF then normalise every recognised line."""
-    out = []
-    with pdfplumber.open(path) as pdf:
-        for page in pdf.pages:
-            img = page.to_image(resolution=300).original
-            raw = pytesseract.image_to_string(img, lang="ara+eng")
-            for ln in raw.splitlines():
-                pretty = normalise_description(ln)
-                if not pretty:
-                    continue
-                key = canonical_key(pretty)
-                out.append(f"{key} | {pretty}")
-
-    return "\n".join(out)
-
-
-
-def extract_text_from_docx(path: str) -> str:
-    doc = Document(path)
-    return "\n".join(p.text for p in doc.paragraphs)
-
 
 # ────────────────────────────────────────────────────────────────────────────────
 # 3.  Prompt & call GPT
@@ -206,7 +184,7 @@ Copy wording exactly; leave blank if absent.
                 (
                 "You are a document-summariser. Your job is to summarise supplier "
                 "quotations into markdown tables. For every material in a row, list the unit "
-                "price quoted by each supplier across the documents. Also make sure that all the materials is listed even if they are not comparable. No extra prose—"
+                "price/Rate quoted by each supplier across the documents. Also make sure that all the materials is listed even if they are not comparable. No extra prose—"
                 "output only the required tables."
                 )
             },
@@ -346,11 +324,8 @@ def run_local_test():
         try:
             ext = os.path.splitext(f)[1].lower()
             if ext == ".pdf":
-                txt = extract_text_from_pdf(path) or extract_text_from_image_pdf(path)
-            elif ext == ".docx":
-                txt = extract_text_from_docx(path)
-            else:  # .txt
-                txt = open(path, encoding="utf-8").read()
+                txt = extract_text_from_pdf(path) 
+                
             combined += f"\n\n--- FILE: {f} ---\n\n{txt}"
         except Exception as exc:
             log(f"     ⚠️ {f}: {exc}")

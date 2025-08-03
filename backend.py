@@ -14,8 +14,7 @@ import logging
 import traceback
 from openai import OpenAI
 from summarize_doc import (
-    extract_text_from_pdf, extract_text_from_image_pdf,
-    extract_text_from_docx, summarize_text_with_gpt,
+    extract_text_from_pdf, summarize_text_with_gpt,
     markdown_table_to_df, save_summary_to_excel
 )
 from supplier_summary import generate_supplier_summary_excel
@@ -80,11 +79,7 @@ async def summarize_quotations(files: list[UploadFile] = File(...)):
         try:
             ext = os.path.splitext(uploaded_file.filename)[1].lower()
             if ext == ".pdf":
-                txt = extract_text_from_pdf(temp_path) or extract_text_from_image_pdf(temp_path)
-            elif ext == ".docx":
-                txt = extract_text_from_docx(temp_path)
-            else:  # .txt
-                txt = open(temp_path, encoding="utf-8").read()
+                txt = extract_text_from_pdf(temp_path)
             combined_text += f"\n\n--- FILE: {uploaded_file.filename} ---\n\n{txt}"
         finally:
             os.remove(temp_path)
