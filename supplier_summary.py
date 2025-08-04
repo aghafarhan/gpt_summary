@@ -30,10 +30,14 @@ Your job is to research and acquire high-quality materials from **real suppliers
 - Item: {item}
 
 ### TASK:
-1. Search ONLY for **industrial supplier websites, manufacturer product pages, Specialized B2B distributors, Authorized local dealers or Regional supplier platforms (serving Saudi Arabia)** based in or shipping to Saudi Arabia.
-2. Return **exactly 10 Saudi-based suppliers** who offer this item or a very close variant.
-3. Additionally, include **1 supplier from China** that ships internationally to Saudi Arabia.
-4. For each supplier, collect:
+1. For this specific material, determine the most relevant supplier types:
+   - If it is a **raw or industrial product** (e.g., steel, rebar, chemicals), focus on **local manufacturers, factories, official stockists, and authorized dealers**.
+   - For branded or specialized products, prioritize **authorized distributors, stockists, or exclusive dealers**.
+   - Avoid generic trading companies unless no direct manufacturer, dealer, or stockist is available.
+2. Search ONLY for **industrial supplier websites, manufacturer product pages, specialized B2B distributors, official stockists, authorized local dealers, or regional supplier platforms** based in or shipping to Saudi Arabia.
+3. Return **exactly 10 Saudi-based suppliers** who offer this item or a very close variant.
+4. Additionally, include **1 supplier from China** that ships internationally to Saudi Arabia.
+5. For each supplier, collect:
    - Supplier name
    - Price estimate (or “Quote Required”)
    - Packaging / MOQ
@@ -41,6 +45,7 @@ Your job is to research and acquire high-quality materials from **real suppliers
 
 ⚠️ INSTRUCTIONS:
 - Return **exactly 11 rows** per item (10 Saudi + 1 China).
+- Use your judgment to select the best supplier category for the given material.
 - No Amazon.
 - No explanations, footnotes, or duplicates.
 - Prefer **specialized suppliers**, **not generic shopping sites**.
