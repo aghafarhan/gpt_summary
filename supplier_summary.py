@@ -27,7 +27,7 @@ You are a senior procurement officer at a construction company in Saudi Arabia.
 Your job is to research and acquire high-quality materials from **real suppliers located in Saudi Arabia only**. You are preparing a procurement summary report for internal use.
 
 ### MATERIAL:
-- Item: {item}
+- Item: {item} Saudi Arabia
 
 ### TASK:
 1. For this specific material, determine the most relevant supplier types:
