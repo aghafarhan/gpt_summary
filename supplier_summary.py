@@ -47,6 +47,7 @@ Your job is to research and acquire high-quality materials from **real suppliers
 - Return **exactly 11 rows** per item (10 Saudi + 1 China).
 - Use your judgment to select the best supplier category for the given material.
 - Website link must be the supplier’s own website or direct product page (not directory or aggregator listings, unless absolutely no other link exists).
+- Prefer the supplier’s **official company website** (e.g., www.companyname.com).
 - No Amazon.
 - No explanations, footnotes, or duplicates.
 - Prefer **specialized suppliers**, **not generic shopping sites**.
