@@ -35,7 +35,7 @@ def log(*args, **kwargs):
 client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY")            
 )
-MODEL = "gpt-4.1"                                   # change to "4o" for faster usage, but may hallucinate
+MODEL = "gpt-5"                                   # change to "4o" for faster usage, but may hallucinate
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -345,3 +345,4 @@ def run_local_test():
 if __name__ == "__main__":
 
     run_local_test()
+
