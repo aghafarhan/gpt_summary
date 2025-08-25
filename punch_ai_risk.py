@@ -118,45 +118,25 @@ def build_forecast_table(table_rows: List[Dict[str, Any]]) -> str:
     return header + "\n".join(lines)
 
 # ----------------------- LLM Forecast -----------------------
-def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optional[List[Dict[str, Any]]]:
-    """Ask gpt-5-mini to forecast month-end CaseA/CaseB for risky employees.
-    Returns ordered rows (matching risky_sorted order) or None on failure.
+# ----------------------- Unified LLM Forecast + Summary -----------------------
+def _maybe_llm_forecast_and_summary(payload: Payload, risky_sorted: List[Employee]) -> Optional[Dict[str, Any]]:
     """
-    import json as _json
-    import time
-    import re
+    Ask gpt-4.1 to generate BOTH:
+      - Forecast table (with prev, cur, forecast CaseA/B)
+      - Bullet-point summary
 
-    def _extract_first_json_object(text: str) -> Optional[dict]:
-        """Best-effort: pull the first {...} JSON object from a string."""
-        if not text:
-            return None
-        # quick scan for first balanced { ... }
-        start = text.find("{")
-        if start == -1:
-            return None
-        # simple brace counter
-        depth = 0
-        for i in range(start, len(text)):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    snippet = text[start:i+1]
-                    try:
-                        return _json.loads(snippet)
-                    except Exception:
-                        return None
-        return None
+    Returns dict with {"table_rows": [...], "summary": "..."} or None on failure.
+    """
+    import time
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        log("⚠️ No OPENAI_API_KEY found; skipping LLM forecast.")
+        log("⚠️ No OPENAI_API_KEY found; skipping LLM.")
         return None
 
     top_n = int(os.getenv("LLM_FORECAST_TOPN", "20"))
     focus = risky_sorted[:top_n]
-    log(f"🧠 Running LLM forecast for top {len(focus)} risky employees…")
+    log(f"🧠 Running unified LLM forecast+summary for top {len(focus)} risky employees…")
 
     factor_hint = _default_forecast_factor(payload.meta)
     content = {
@@ -180,142 +160,55 @@ def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optio
     }
 
     system = (
-        "You are a data analyst. Forecast month‑end CaseA and CaseB for each employee.\n"
-        "Return STRICT JSON only that matches the schema below. Do not include prose, code fences, or comments."
-    )
-    user = (
-        "Schema:\n"
+        "You are a data analyst. Your job:\n"
+        "1. Forecast month-end CaseA and CaseB for each employee.\n"
+        "2. Write a short bullet-point summary of the forecasts.\n\n"
+        "IMPORTANT:\n"
+        "- Output STRICT JSON only, no prose outside JSON.\n"
+        "- Schema must exactly match:\n"
         "{\n"
         '  "items": [\n'
         '    {"name": str, "nid": str, "caseA": int, "prev_caseA": int, "forecast_caseA": int,\n'
-        '     "caseB": int, "prev_caseB": int, "forecast_caseB": int}\n'
-        "  ]\n"
-        "}\n\n"
-        "Definitions:\n"
-        "- caseA = count of days actual<9h while posted≈10h (this month).\n"
-        "- caseB = count of one‑punch days (only IN or only OUT) with posted≈10h (this month).\n\n"
-        "Rules:\n"
-        "- Use ONLY the provided employees; do not add extra rows.\n"
-        "- Start from naive_factor * current and compare with previous month.\n"
-        "- forecast_* must be integers and NEVER below the current values.\n"
-        "- Cap extreme growth to reasonable bounds.\n\n"
-        f"INPUT:\n{content}"
+        '     "caseB": int, "prev_caseB": int, "forecast_caseB": int, "gap_h": float}\n'
+        "  ],\n"
+        '  "summary": str  # markdown bullet points, ~120 words, no employee name list\n'
+        "}\n"
     )
+    user = f"INPUT:\n{_json.dumps(content, ensure_ascii=False)}"
 
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
 
         def _call_once() -> str:
-            # Do NOT pass response_format; gpt-5-mini on chat.completions sometimes returns empty with it.
             resp = client.chat.completions.create(
-                model="gpt-5-mini",
+                model="gpt-4.1",
                 messages=[{"role": "system", "content": system},
                           {"role": "user", "content": user}],
-                # leave temperature default (1) – model errors if set otherwise for some configs
-                # let the API choose token budget; the payload is tiny
             )
             return resp.choices[0].message.content if (resp and resp.choices) else ""
 
         raw = _call_once()
-        if not raw or not raw.strip():
-            log("⚠️ LLM forecast: empty content; retrying once…")
-            time.sleep(0.8)
+        if not raw.strip():
+            log("⚠️ Unified LLM: empty response; retrying once…")
+            time.sleep(1)
             raw = _call_once()
 
-        if not raw or not raw.strip():
-            log("❌ LLM forecast failed: empty response body from model.")
+        if not raw.strip():
+            log("❌ Unified LLM failed: empty response.")
             return None
 
-        # Parse JSON strictly; if it fails, try to salvage the first JSON object.
-        try:
-            parsed = _json.loads(raw)
-        except Exception as je:
-            preview = raw[:400].replace("\n", " ")
-            log(f"⚠️ JSON parse failed ({je}); trying to extract first JSON object. Preview: {preview}")
-            parsed = _extract_first_json_object(raw)
-            if parsed is None:
-                log("❌ Could not recover a valid JSON object from model output.")
-                return None
+        parsed = _json.loads(raw)
+        items = parsed.get("items", [])
+        summary = parsed.get("summary", "").strip()
+        log(f"✅ Unified LLM returned {len(items)} items + summary length {len(summary)}.")
 
-        items = parsed.get("items", []) if isinstance(parsed, dict) else []
-        log(f"✅ LLM forecast returned {len(items)} item(s).")
-
-        # Reorder to match original focus order and attach gap_h
-        by_nid = {}
-        for it in items:
-            try:
-                row = {
-                    "name": str(it.get("name") or ""),
-                    "nid": str(it.get("nid") or ""),
-                    "caseA": int(it.get("caseA", 0)),
-                    "prev_caseA": int(it.get("prev_caseA", 0)),
-                    "forecast_caseA": max(int(it.get("forecast_caseA", 0)), int(it.get("caseA", 0))),
-                    "caseB": int(it.get("caseB", 0)),
-                    "prev_caseB": int(it.get("prev_caseB", 0)),
-                    "forecast_caseB": max(int(it.get("forecast_caseB", 0)), int(it.get("caseB", 0))),
-                }
-                by_nid[row["nid"]] = row
-            except Exception as row_err:
-                log(f"⚠️ Skipping one malformed LLM item: {row_err}")
-
-        ordered: List[Dict[str, Any]] = []
-        for e in focus:
-            r = by_nid.get(e.nid)
-            if r:
-                r["gap_h"] = round(float(e.sum_gap), 2)
-                ordered.append(r)
-
-        if not ordered:
-            log("⚠️ LLM forecast produced no matching NIDs after ordering; falling back.")
-            return None
-
-        return ordered
+        return {"items": items, "summary": summary}
 
     except Exception as e:
-        log(f"❌ LLM forecast failed: {e}")
+        log(f"❌ Unified LLM forecast+summary failed: {e}")
         return None
 
-
-# ----------------------- LLM Forecast Summary -----------------------
-def maybe_llm_forecast_summary(meta: Meta, table_rows: List[Dict[str, Any]]) -> Optional[str]:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        log("⚠️ No OPENAI_API_KEY found; skipping LLM summary.")
-        return None
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        compact = [{
-            "name": r["name"], "nid": r["nid"],
-            "A_prev": r["prev_caseA"], "A_cur": r["caseA"], "A_fc": r["forecast_caseA"],
-            "B_prev": r["prev_caseB"], "B_cur": r["caseB"], "B_fc": r["forecast_caseB"],
-            "gap_h": r.get("gap_h", 0.0)
-        } for r in table_rows[:10]]
-
-        log("📝 Asking GPT-5-mini to generate forecast summary...")
-        prompt = (
-            "Write a concise Markdown summary (~120 words) of attendance risk forecasts. "
-            "Format the output as clear bullet points. "
-            "Cover:\n"
-            "- Total risky employees\n"
-            "- Notable forecast changes vs previous month\n"
-            "- 2–3 recommended actions\n\n"
-            "Do NOT include a watchlist of names (already in table)."
-            f"\nProject: {meta.project_name or '-'}\n"
-            f"Month: {meta.month} vs {meta.prev_month or 'prev'}\n"
-            f"Rows: {compact}"
-        )
-        resp = client.chat.completions.create(
-            model="gpt-5-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=220,
-        )
-        log("✅ LLM summary generated.")
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        log(f"❌ LLM summary failed: {e}")
-        return None
 
 # ----------------------- Public API -----------------------
 def build_insights(payload: Payload) -> Dict[str, Any]:
@@ -325,19 +218,29 @@ def build_insights(payload: Payload) -> Dict[str, Any]:
 
     total_gap_risky = round(sum(e.sum_gap for e in risky), 2)
 
-    # Forecast
-    llm_rows = _maybe_llm_forecast(payload, risky)
-    table_rows = llm_rows if llm_rows is not None else _rule_based_forecast_rows(risky, payload.meta)
+    # Try unified GPT-4.1 call
+    llm_result = _maybe_llm_forecast_and_summary(payload, risky)
+
+    if llm_result:
+        table_rows = llm_result["items"]
+        summary_md = llm_result["summary"] or None
+        used_llm_forecast = True
+        used_llm_summary = True
+    else:
+        # fallback to rule-based
+        table_rows = _rule_based_forecast_rows(risky, payload.meta)
+        summary_md = None
+        used_llm_forecast = False
+        used_llm_summary = False
+
     forecast_table_md = build_forecast_table(table_rows)
 
-    # Notes
     notes = (
-        f"Project: {payload.meta.project_name or '-'} • Period: {payload.meta.month} (vs {payload.meta.prev_month or 'previous month'}) • "
+        f"Project: {payload.meta.project_name or '-'} • Period: {payload.meta.month} "
+        f"(vs {payload.meta.prev_month or 'previous month'}) • "
         f"Risky employees: {len(risky)} • Total gap (risky): {total_gap_risky}h."
     )
 
-    # Summary
-    summary_md = maybe_llm_forecast_summary(payload.meta, table_rows)
     if not summary_md:
         log("⚠️ Falling back to heuristic summary.")
         summary_md = f"- Risky employees: {len(risky)}\n- Total risky gap: {total_gap_risky}h"
@@ -350,9 +253,10 @@ def build_insights(payload: Payload) -> Dict[str, Any]:
         "risky_compare": table_rows,
         "risky_count": len(risky),
         "total_gap_risky": total_gap_risky,
-        "used_llm_forecast": llm_rows is not None,
-        "used_llm_summary": summary_md is not None,
+        "used_llm_forecast": used_llm_forecast,
+        "used_llm_summary": used_llm_summary,
     }
+
 
 # ----------------------- Local Test -----------------------
 if __name__ == "__main__":
@@ -365,6 +269,7 @@ if __name__ == "__main__":
     )
     out = build_insights(dummy)
     log("OUTPUT:", out)
+
 
 
 
