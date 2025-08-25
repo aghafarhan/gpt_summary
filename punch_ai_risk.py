@@ -105,7 +105,7 @@ def build_forecast_table(table_rows: List[Dict[str, Any]]) -> str:
     if not table_rows:
         return "_No risky employees to forecast._"
 
-    header = "| Name | NID | CaseA (Prev→Cur→Fc) | CaseB (Prev→Cur→Fc) | Gap (h) |\n"
+    header = "| Name | NID | CaseA (Prev Month → Current Month → Forecast) | CaseB (Prev Month → Current Month → Forecast) | Gap (h) |\n"
     header += "|------|-----|---------------------|---------------------|---------|\n"
     lines = []
     for r in table_rows:
@@ -269,6 +269,7 @@ if __name__ == "__main__":
     )
     out = build_insights(dummy)
     log("OUTPUT:", out)
+
 
 
 
