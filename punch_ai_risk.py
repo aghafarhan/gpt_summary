@@ -160,7 +160,7 @@ def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optio
                 {"role": "user", "content": f"INPUT:\n{content}"}
             ],
             temperature=0.2,
-            max_tokens=800,
+            max_completion_tokens=800,
             response_format={"type": "json_object"},
         )
         parsed = _json.loads(resp.choices[0].message.content)
@@ -216,7 +216,7 @@ def maybe_llm_forecast_summary(meta: Meta, table_rows: List[Dict[str, Any]]) -> 
             model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=220,
+            max_completion_tokens=220,
         )
         log("✅ LLM summary generated.")
         return resp.choices[0].message.content.strip()
@@ -272,4 +272,5 @@ if __name__ == "__main__":
     )
     out = build_insights(dummy)
     log("OUTPUT:", out)
+
 
