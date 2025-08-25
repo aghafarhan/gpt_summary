@@ -119,18 +119,36 @@ def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optio
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
+        # Default to gpt-5-mini, but allow override via env
+        model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+
+        system = (
+            "You are a data analyst. Forecast month-end CaseA and CaseB for each employee.\n"
+            "OUTPUT: STRICT JSON per schema. Do not include prose."
+        )
+        user = (
+            "Schema:\n"
+            "{\n"
+            '  "items": [\n'
+            '    {"name": str, "nid": str, "caseA": int, "prev_caseA": int, "forecast_caseA": int,\n'
+            '     "caseB": int, "prev_caseB": int, "forecast_caseB": int}\n'
+            "  ]\n"
+            "}\n\n"
+            "Definitions:\n"
+            "- CaseA = days with actual<9h but posted≈10h (per employee, this month).\n"
+            "- CaseB = one‑punch days (only IN or only OUT) with posted≈10h (per employee, this month).\n"
+            "Rules:\n"
+            "- Use ONLY provided employees (no extras).\n"
+            "- Start from naive_factor * current; adjust vs previous month.\n"
+            "- forecast_* are integers; NEVER below current values; cap extreme growth if unrealistic.\n"
+            "- Preserve input ordering for the same employees; return items only for provided NIDs.\n\n"
+            f"INPUT:\n{content}"
+        )
+
         resp = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-            messages=[
-                {"role": "system", "content":
-                 "You are a data analyst. Forecast month-end CaseA and CaseB. "
-                 "Return STRICT JSON per schema. No prose."},
-                {"role": "user", "content":
-                 "Schema:{\"items\":[{\"name\":str,\"nid\":str,\"caseA\":int,\"prev_caseA\":int,"
-                 "\"forecast_caseA\":int,\"caseB\":int,\"prev_caseB\":int,\"forecast_caseB\":int}]}\n"
-                 "Rules: start from naive_factor*current; adjust vs previous; never below current; cap extremes.\n"
-                 f"INPUT:\n{content}"}
-            ],
+            model=model,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}],
             temperature=0.2,
             max_tokens=800,
             response_format={"type": "json_object"},
@@ -150,6 +168,7 @@ def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optio
                 "prev_caseB": int(it.get("prev_caseB", 0)),
                 "forecast_caseB": max(int(it.get("forecast_caseB", 0)), int(it.get("caseB", 0))),
             })
+        # Keep original order of risky_sorted
         nid_to_row = {r["nid"]: r for r in rows}
         ordered = []
         for e in risky_sorted[:top_n]:
@@ -169,26 +188,48 @@ def maybe_llm_forecast_summary(meta: Meta, table_rows: List[Dict[str, Any]]) -> 
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
+        model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+
         compact = [{
             "name": r["name"], "nid": r["nid"],
-            "A": r["caseA"], "A_prev": r["prev_caseA"], "A_fc": r["forecast_caseA"],
-            "B": r["caseB"], "B_prev": r["prev_caseB"], "B_fc": r["forecast_caseB"],
+            "caseA": r["caseA"], "prev_caseA": r["prev_caseA"], "forecast_caseA": r["forecast_caseA"],
+            "caseB": r["caseB"], "prev_caseB": r["prev_caseB"], "forecast_caseB": r["forecast_caseB"],
+            "gap_h": r.get("gap_h", 0.0)
+        }]  # small payload; we’ll slice below
+
+        compact = [{
+            "name": r["name"], "nid": r["nid"],
+            "caseA": r["caseA"], "prev_caseA": r["prev_caseA"], "forecast_caseA": r["forecast_caseA"],
+            "caseB": r["caseB"], "prev_caseB": r["prev_caseB"], "forecast_caseB": r["forecast_caseB"],
             "gap_h": r.get("gap_h", 0.0)
         } for r in table_rows[:20]]
 
+        topN = min(3, len(compact))  # never ask for more than we have
+
         prompt = (
-            "Write a concise Markdown summary (~120 words) of attendance risk forecasts. "
-            "Cover risky count, notable forecast changes vs previous month, top 3 to watch, and 2–3 actions. "
-            "No tables.\n\n"
-            f"Project: {meta.project_name or '-'}\n"
-            f"Month: {meta.month} vs {meta.prev_month or 'prev'}\n"
-            f"Rows: {compact}"
+            "You are an auditor. Produce a concise Markdown **forecast summary** of attendance FRAUD‑RISK.\n"
+            "DEFINITIONS:\n"
+            "- CaseA = days with actual<9h but posted≈10h (per employee, this month).\n"
+            "- CaseB = one‑punch days (only IN or only OUT) with posted≈10h (per employee, this month).\n"
+            "GUIDELINES:\n"
+            "- Use ONLY the provided rows; do NOT invent employees or placeholders.\n"
+            "- Neutral numeric tone: e.g., “A 3→4, B 7→7”. No HR coaching language.\n"
+            "- Keep ≤120 words. No tables.\n"
+            "OUTPUT structure:\n"
+            "• One line with project and months.\n"
+            "• Bullet: Total forecasted load = sum of (forecast_A + forecast_B) across rows; if possible, mention previous totals.\n"
+            "• 1–3 bullets of notable increases/decreases (largest deltas vs previous month) with numbers.\n"
+            f"• **Watchlist ({topN})** — list exactly {topN} names with: “A cur→Â, B cur→B̂, gap Xh”.\n"
+            "• 2–3 concrete actions about investigating timecards/one‑punch patterns (no generic platitudes).\n\n"
+            f"Project: {meta.project_name or '-'}  |  Month: {meta.month} vs {meta.prev_month or 'prev'}\n"
+            f"Rows JSON: {compact}"
         )
+
         resp = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=180,
+            max_tokens=220,
         )
         return resp.choices[0].message.content.strip()
     except Exception:
@@ -243,3 +284,4 @@ def build_insights(payload: Payload) -> Dict[str, Any]:
         "forecast_summary_md": summary_md,
         "used_llm_summary": bool(summary_md),
     }
+
