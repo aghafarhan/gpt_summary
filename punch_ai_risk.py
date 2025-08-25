@@ -1,9 +1,24 @@
-# summarize_ai_risk.py  (library only; no FastAPI app here)
+# punch_ai_risk.py
+"""
+Library for forecasting and summarizing punch hours AI risk.
+Can be imported into FastAPI backend, or run locally in test mode.
+"""
+
 import os
+import json as _json
 from typing import List, Optional, Dict, Any
 from datetime import date
 from calendar import monthrange
 from pydantic import BaseModel, Field
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Logging setup
+# ────────────────────────────────────────────────────────────────────────────────
+VERBOSE_MODE = __name__ == "__main__"   # Only print logs when run directly
+
+def log(*args, **kwargs):
+    if VERBOSE_MODE:
+        print(*args, **kwargs)
 
 # ----------------------- Models -----------------------
 class Employee(BaseModel):
@@ -68,6 +83,7 @@ def _score_for_sort(e: Employee) -> tuple:
 
 # ----------------------- Rule-based (fallback) -----------------------
 def _rule_based_forecast_rows(risky_sorted: List[Employee], meta: Meta) -> List[Dict[str, Any]]:
+    log("⚙️ Using rule-based forecast (LLM not available).")
     factor = _default_forecast_factor(meta)
     rows = []
     for e in risky_sorted:
@@ -107,20 +123,13 @@ def build_forecast_table(table_rows: List[Dict[str, Any]]) -> str:
 def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optional[List[Dict[str, Any]]]:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
+        log("⚠️ No OPENAI_API_KEY found; skipping LLM forecast.")
         return None
 
+    log(f"🧠 Running LLM forecast for top {len(risky_sorted)} risky employees…")
     top_n = int(os.getenv("LLM_FORECAST_TOPN", "20"))
-    emps = [{
-        "nid": e.nid,
-        "name": e.name or e.nid,
-        "caseA": e.caseA,
-        "caseB": e.caseB,
-        "prev_caseA": e.prev_caseA or 0,
-        "prev_caseB": e.prev_caseB or 0,
-        "sum_gap": round(e.sum_gap, 2),
-    } for e in risky_sorted[:top_n]]
-
     factor_hint = _default_forecast_factor(payload.meta)
+
     content = {
         "meta": {
             "project": payload.meta.project_name or "-",
@@ -130,49 +139,35 @@ def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optio
             "days_covered": payload.meta.days_covered or None,
             "naive_forecast_factor": factor_hint
         },
-        "employees": emps
+        "employees": [{
+            "nid": e.nid,
+            "name": e.name or e.nid,
+            "caseA": e.caseA,
+            "caseB": e.caseB,
+            "prev_caseA": e.prev_caseA or 0,
+            "prev_caseB": e.prev_caseB or 0,
+            "sum_gap": round(e.sum_gap, 2),
+        } for e in risky_sorted[:top_n]]
     }
 
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
-        # Default to gpt-5-mini, but allow override via env
-        model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
-
-        system = (
-            "You are a data analyst. Forecast month-end CaseA and CaseB for each employee.\n"
-            "OUTPUT: STRICT JSON per schema. Do not include prose."
-        )
-        user = (
-            "Schema:\n"
-            "{\n"
-            '  "items": [\n'
-            '    {"name": str, "nid": str, "caseA": int, "prev_caseA": int, "forecast_caseA": int,\n'
-            '     "caseB": int, "prev_caseB": int, "forecast_caseB": int}\n'
-            "  ]\n"
-            "}\n\n"
-            "Definitions:\n"
-            "- CaseA = days with actual<9h but posted≈10h (per employee, this month).\n"
-            "- CaseB = one‑punch days (only IN or only OUT) with posted≈10h (per employee, this month).\n"
-            "Rules:\n"
-            "- Use ONLY provided employees (no extras).\n"
-            "- Start from naive_factor * current; adjust vs previous month.\n"
-            "- forecast_* are integers; NEVER below current values; cap extreme growth if unrealistic.\n"
-            "- Preserve input ordering for the same employees; return items only for provided NIDs.\n\n"
-            f"INPUT:\n{content}"
-        )
-
         resp = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}],
+            model="gpt-5-mini",
+            messages=[
+                {"role": "system", "content":
+                 "You are a data analyst. Forecast month-end CaseA and CaseB for each employee. "
+                 "Output STRICT JSON. No prose."},
+                {"role": "user", "content": f"INPUT:\n{content}"}
+            ],
             temperature=0.2,
             max_tokens=800,
             response_format={"type": "json_object"},
         )
-        import json as _json
         parsed = _json.loads(resp.choices[0].message.content)
         items = parsed.get("items", [])
+        log(f"✅ LLM forecast returned {len(items)} employees.")
         rows = []
         for it in items:
             rows.append({
@@ -185,27 +180,20 @@ def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optio
                 "prev_caseB": int(it.get("prev_caseB", 0)),
                 "forecast_caseB": max(int(it.get("forecast_caseB", 0)), int(it.get("caseB", 0))),
             })
-        # Keep original order of risky_sorted
-        nid_to_row = {r["nid"]: r for r in rows}
-        ordered = []
-        for e in risky_sorted[:top_n]:
-            r = nid_to_row.get(e.nid)
-            if r:
-                r["gap_h"] = round(e.sum_gap, 2)
-                ordered.append(r)
-        return ordered or None
-    except Exception:
+        return rows or None
+    except Exception as e:
+        log(f"❌ LLM forecast failed: {e}")
         return None
 
 # ----------------------- LLM Forecast Summary -----------------------
 def maybe_llm_forecast_summary(meta: Meta, table_rows: List[Dict[str, Any]]) -> Optional[str]:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
+        log("⚠️ No OPENAI_API_KEY found; skipping LLM summary.")
         return None
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
-
         compact = [{
             "name": r["name"], "nid": r["nid"],
             "A_prev": r["prev_caseA"], "A_cur": r["caseA"], "A_fc": r["forecast_caseA"],
@@ -213,90 +201,76 @@ def maybe_llm_forecast_summary(meta: Meta, table_rows: List[Dict[str, Any]]) -> 
             "gap_h": r.get("gap_h", 0.0)
         } for r in table_rows[:10]]
 
+        log("📝 Asking GPT-5-mini to generate forecast summary...")
         prompt = (
             "Write a concise Markdown summary (~120 words) of attendance risk forecasts. "
             "Format the output as clear bullet points. "
             "Cover:\n"
             "- Total risky employees\n"
-            "- Notable forecast increases/decreases compared to previous month\n"
+            "- Notable forecast changes vs previous month\n"
             "- 2–3 recommended actions\n\n"
-            "Do NOT include a watchlist of employee names (they already appear in the table). "
-            "Keep it professional and concise.\n\n"
-            f"Project: {meta.project_name or '-'}\n"
+            "Do NOT include a watchlist of names (already in table)."
+            f"\nProject: {meta.project_name or '-'}\n"
             f"Month: {meta.month} vs {meta.prev_month or 'prev'}\n"
             f"Rows: {compact}"
         )
-        
         resp = client.chat.completions.create(
             model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=220,
         )
+        log("✅ LLM summary generated.")
         return resp.choices[0].message.content.strip()
-    except Exception:
+    except Exception as e:
+        log(f"❌ LLM summary failed: {e}")
         return None
 
-def fallback_forecast_summary(meta: Meta, table_rows: List[Dict[str, Any]]) -> str:
-    risky_count = len(table_rows)
-    actions = [
-        "Audit timecards and device logs of high-forecast employees.",
-        "Trigger supervisor review when CaseA or CaseB ≥ 5 mid-month.",
-        "Enable daily anomaly alerts for one-punch patterns."
-    ]
-    parts = [
-        f"**{meta.project_name or '-'} – {meta.month} (vs {meta.prev_month or 'prev'})**",
-        f"- Risky employees: **{risky_count}**",
-        f"- Total forecast gap risk: ~{sum(r['gap_h'] for r in table_rows):.2f}h",
-        "### Recommended Actions:",
-    ] + [f"- {a}" for a in actions]
-    return "\n".join(parts)
-
-# ----------------------- Public API (for backend.py to call) -----------------------
+# ----------------------- Public API -----------------------
 def build_insights(payload: Payload) -> Dict[str, Any]:
-    emps = payload.employees
-    meta = payload.meta
+    log("📥 Building insights...")
+    risky = [e for e in payload.employees if (e.caseA >= 5 or e.caseB >= 5)]
+    log(f"⚠️ Found {len(risky)} risky employees.")
 
-    risky = [e for e in emps if (e.caseA >= 5 or e.caseB >= 5)]
-    risky_sorted = sorted(risky, key=_score_for_sort, reverse=True)
     total_gap_risky = round(sum(e.sum_gap for e in risky), 2)
 
-    # Forecast rows
-    llm_rows = _maybe_llm_forecast(payload, risky_sorted)
-    table_rows = llm_rows if llm_rows is not None else _rule_based_forecast_rows(risky_sorted, meta)
-
-    # Build forecast table
+    # Forecast
+    llm_rows = _maybe_llm_forecast(payload, risky)
+    table_rows = llm_rows if llm_rows is not None else _rule_based_forecast_rows(risky, payload.meta)
     forecast_table_md = build_forecast_table(table_rows)
 
     # Notes
     notes = (
-        f"Project: {meta.project_name or '-'} • Period: {meta.month} (vs {meta.prev_month or 'previous month'}) • "
-        f"Risky employees: {len(risky_sorted)} • Total gap (risky): {total_gap_risky}h."
+        f"Project: {payload.meta.project_name or '-'} • Period: {payload.meta.month} (vs {payload.meta.prev_month or 'previous month'}) • "
+        f"Risky employees: {len(risky)} • Total gap (risky): {total_gap_risky}h."
     )
 
-    # Top risky (for JSON consumers)
-    top_risky_strings = [
-        f"{r['name']} — Gap {r.get('gap_h', 0):.2f}h (A {r['caseA']}→{r['forecast_caseA']}, "
-        f"B {r['caseB']}→{r['forecast_caseB']})"
-        for r in table_rows[:10]
-    ]
+    # Summary
+    summary_md = maybe_llm_forecast_summary(payload.meta, table_rows)
+    if not summary_md:
+        log("⚠️ Falling back to heuristic summary.")
+        summary_md = f"- Risky employees: {len(risky)}\n- Total risky gap: {total_gap_risky}h"
 
-    # Textual summary
-    summary_md = maybe_llm_forecast_summary(meta, table_rows) or fallback_forecast_summary(meta, table_rows)
-
+    log("✅ Insights built.")
     return {
         "risk_notes": notes,
-        "forecast_table_md": forecast_table_md,   # ⬅️ new Markdown table
-        "forecast_summary_md": summary_md,        # ⬅️ textual summary
-        "top_risky": top_risky_strings,
+        "forecast_table_md": forecast_table_md,
+        "forecast_summary_md": summary_md,
         "risky_compare": table_rows,
-        "risky_count": len(risky_sorted),
+        "risky_count": len(risky),
         "total_gap_risky": total_gap_risky,
         "used_llm_forecast": llm_rows is not None,
         "used_llm_summary": summary_md is not None,
     }
 
-
-
-
-
+# ----------------------- Local Test -----------------------
+if __name__ == "__main__":
+    dummy = Payload(
+        meta=Meta(project_name="Test Project", month="2025-08", prev_month="2025-07"),
+        employees=[
+            Employee(nid="123", name="Ali", caseA=6, caseB=2, sum_gap=45),
+            Employee(nid="456", name="Ahmed", caseA=3, caseB=7, sum_gap=38.5),
+        ]
+    )
+    out = build_insights(dummy)
+    log("OUTPUT:", out)
