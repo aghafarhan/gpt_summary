@@ -86,6 +86,23 @@ def _rule_based_forecast_rows(risky_sorted: List[Employee], meta: Meta) -> List[
         })
     return rows
 
+def build_forecast_table(table_rows: List[Dict[str, Any]]) -> str:
+    """Return forecast rows as Markdown table."""
+    if not table_rows:
+        return "_No risky employees to forecast._"
+
+    header = "| Name | NID | CaseA (Prev→Cur→Fc) | CaseB (Prev→Cur→Fc) | Gap (h) |\n"
+    header += "|------|-----|---------------------|---------------------|---------|\n"
+    lines = []
+    for r in table_rows:
+        lines.append(
+            f"| {r['name']} | {r['nid']} | "
+            f"{r['prev_caseA']}→{r['caseA']}→{r['forecast_caseA']} | "
+            f"{r['prev_caseB']}→{r['caseB']}→{r['forecast_caseB']} | "
+            f"{r.get('gap_h', 0.0):.2f} |"
+        )
+    return header + "\n".join(lines)
+
 # ----------------------- LLM Forecast -----------------------
 def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optional[List[Dict[str, Any]]]:
     api_key = os.getenv("OPENAI_API_KEY")
@@ -188,55 +205,29 @@ def maybe_llm_forecast_summary(meta: Meta, table_rows: List[Dict[str, Any]]) -> 
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
-        model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 
-        # Compact rows for the model (cap to 20 for speed)
         compact = [{
             "name": r["name"], "nid": r["nid"],
-            "caseA": int(r["caseA"]), "prev_caseA": int(r["prev_caseA"]), "forecast_caseA": int(r["forecast_caseA"]),
-            "caseB": int(r["caseB"]), "prev_caseB": int(r["prev_caseB"]), "forecast_caseB": int(r["forecast_caseB"]),
-            "gap_h": float(r.get("gap_h", 0.0))
-        } for r in table_rows[:20]]
-
-        # Totals for clearer, numeric context
-        total_fc = sum(r["forecast_caseA"] + r["forecast_caseB"] for r in compact)
-        total_prev = sum(r["prev_caseA"] + r["prev_caseB"] for r in compact)
-        topN = min(3, len(compact))
-
-        # If there are no risky rows, short‑circuit with a deterministic line
-        if topN == 0:
-            return (
-                f"**{meta.project_name or '-'} – {meta.month} (vs {meta.prev_month or 'prev'})**\n"
-                "No employees meet the risk threshold this month. Continue routine monitoring."
-            )
+            "A_prev": r["prev_caseA"], "A_cur": r["caseA"], "A_fc": r["forecast_caseA"],
+            "B_prev": r["prev_caseB"], "B_cur": r["caseB"], "B_fc": r["forecast_caseB"],
+            "gap_h": r.get("gap_h", 0.0)
+        } for r in table_rows[:10]]
 
         prompt = (
-            "You are an auditor. Produce a concise Markdown forecast summary of attendance FRAUD‑RISK.\n"
-            "DEFINITIONS:\n"
-            "- CaseA = days with actual<9h but posted≈10h (per employee, this month).\n"
-            "- CaseB = one‑punch days (only IN or only OUT) with posted≈10h (per employee, this month).\n"
-            "STYLE RULES (STRICT):\n"
-            "- Use ONLY the provided rows; do NOT invent employees or placeholders.\n"
-            "- Use neutral numeric tone with CaseA/CaseB terms (never say 'absence' or 'attendance problems').\n"
-            "- Keep ≤120 words. No tables. No headings. Use 4–6 short bullets only.\n"
-            "- Watchlist must list EXACTLY {N} employees; do not add notes about missing items.\n"
-            "CONTENT RULES:\n"
-            "• Line 1: **{Project} – {Month} (vs {Prev})**\n"
-            "• Bullet: Total forecasted load = {TotalFc} risk days; previous total = {TotalPrev}.\n"
-            "• 1–2 bullets: notable increases/decreases vs previous month (use format 'Name: A cur→Â, B cur→B̂').\n"
-            "• Bullet: **Watchlist ({N})** — Name1: A cur→Â, B cur→B̂, gap Xh; Name2: ...\n"
-            "• 1–2 action bullets: investigations (timecards/machine logs), one‑punch checks, supervisor review thresholds.\n"
-            "\n"
+            "You are a compliance analyst. Write a short Markdown summary (~100 words) "
+            "of attendance risk forecasts. Use only provided employees.\n\n"
+            "Include:\n"
+            "- Total risky employees\n"
+            "- Notable increases vs previous month\n"
+            "- Top 2–3 to watch with numeric CaseA/CaseB forecast\n"
+            "- 2 action points (investigate logs, supervisor review)\n\n"
             f"Project: {meta.project_name or '-'}\n"
-            f"Month: {meta.month}\n"
-            f"Prev: {meta.prev_month or 'prev'}\n"
-            f"Rows JSON: {compact}\n"
-        ).replace("{N}", str(topN)).replace("{Project}", meta.project_name or "-") \
-         .replace("{Month}", meta.month).replace("{Prev}", meta.prev_month or "prev") \
-         .replace("{TotalFc}", str(total_fc)).replace("{TotalPrev}", str(total_prev))
+            f"Month: {meta.month} vs {meta.prev_month or 'prev'}\n"
+            f"Rows: {compact}"
+        )
 
         resp = client.chat.completions.create(
-            model=model,
+            model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=220,
@@ -267,32 +258,41 @@ def build_insights(payload: Payload) -> Dict[str, Any]:
     risky_sorted = sorted(risky, key=_score_for_sort, reverse=True)
     total_gap_risky = round(sum(e.sum_gap for e in risky), 2)
 
+    # Forecast rows
     llm_rows = _maybe_llm_forecast(payload, risky_sorted)
     table_rows = llm_rows if llm_rows is not None else _rule_based_forecast_rows(risky_sorted, meta)
 
+    # Build forecast table
+    forecast_table_md = build_forecast_table(table_rows)
+
+    # Notes
     notes = (
         f"Project: {meta.project_name or '-'} • Period: {meta.month} (vs {meta.prev_month or 'previous month'}) • "
         f"Risky employees: {len(risky_sorted)} • Total gap (risky): {total_gap_risky}h."
     )
 
+    # Top risky (for JSON consumers)
     top_risky_strings = [
-        f"{r['name']} — Gap {r.get('gap_h', 0):.2f}h (A {r['caseA']}, B {r['caseB']}; "
-        f"Prev A {r['prev_caseA']}, B {r['prev_caseB']}; "
-        f"Forecast A {r['forecast_caseA']}, B {r['forecast_caseB']})"
+        f"{r['name']} — Gap {r.get('gap_h', 0):.2f}h (A {r['caseA']}→{r['forecast_caseA']}, "
+        f"B {r['caseB']}→{r['forecast_caseB']})"
         for r in table_rows[:10]
     ]
 
+    # Textual summary
     summary_md = maybe_llm_forecast_summary(meta, table_rows) or fallback_forecast_summary(meta, table_rows)
 
     return {
         "risk_notes": notes,
+        "forecast_table_md": forecast_table_md,   # ⬅️ new Markdown table
+        "forecast_summary_md": summary_md,        # ⬅️ textual summary
         "top_risky": top_risky_strings,
         "risky_compare": table_rows,
         "risky_count": len(risky_sorted),
         "total_gap_risky": total_gap_risky,
         "used_llm_forecast": llm_rows is not None,
-        "forecast_summary_md": summary_md,
-        "used_llm_summary": bool(summary_md),
+        "used_llm_summary": summary_md is not None,
     }
+
+
 
 
