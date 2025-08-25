@@ -155,6 +155,7 @@ async def chat_about_quotation(payload: ChatQuery):
     except Exception as e:
         return {"error": str(e)}   
 
-@app.post("/summarize-ai-risk/")
+@app.post("/punch-ai-risk/")
 async def summarize_ai_risk(payload: RiskPayload):
     return build_insights(payload)
+
