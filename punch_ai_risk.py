@@ -119,15 +119,25 @@ def build_forecast_table(table_rows: List[Dict[str, Any]]) -> str:
 
 # ----------------------- LLM Forecast -----------------------
 def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optional[List[Dict[str, Any]]]:
+    """Ask gpt-5-mini to forecast month-end CaseA/CaseB for risky employees.
+    Returns ordered rows (matching risky_sorted order) or None on failure.
+    """
+    import json as _json
+
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         log("⚠️ No OPENAI_API_KEY found; skipping LLM forecast.")
         return None
 
-    log(f"🧠 Running LLM forecast for top {len(risky_sorted)} risky employees…")
+    # Scope / size hints
     top_n = int(os.getenv("LLM_FORECAST_TOPN", "20"))
+    focus = risky_sorted[:top_n]
+    log(f"🧠 Running LLM forecast for top {len(focus)} risky employees…")
+
+    # Naive factor for the model (days covered → month-end)
     factor_hint = _default_forecast_factor(payload.meta)
 
+    # Compact, deterministic input object
     content = {
         "meta": {
             "project": payload.meta.project_name or "-",
@@ -140,45 +150,102 @@ def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optio
         "employees": [{
             "nid": e.nid,
             "name": e.name or e.nid,
-            "caseA": e.caseA,
-            "caseB": e.caseB,
-            "prev_caseA": e.prev_caseA or 0,
-            "prev_caseB": e.prev_caseB or 0,
-            "sum_gap": round(e.sum_gap, 2),
-        } for e in risky_sorted[:top_n]]
+            "caseA": int(e.caseA),
+            "caseB": int(e.caseB),
+            "prev_caseA": int(e.prev_caseA or 0),
+            "prev_caseB": int(e.prev_caseB or 0),
+            "sum_gap": round(float(e.sum_gap), 2),
+        } for e in focus]
     }
+
+    # Build the strict JSON prompt
+    system = (
+        "You are a data analyst. Forecast month‑end CaseA and CaseB for each employee.\n"
+        "OUTPUT: STRICT JSON that matches the schema. No prose."
+    )
+    user = (
+        "Schema:\n"
+        "{\n"
+        '  "items": [\n'
+        '    {"name": str, "nid": str, "caseA": int, "prev_caseA": int, "forecast_caseA": int,\n'
+        '     "caseB": int, "prev_caseB": int, "forecast_caseB": int}\n'
+        "  ]\n"
+        "}\n\n"
+        "Definitions:\n"
+        "- caseA = count of days actual<9h while posted≈10h (this month).\n"
+        "- caseB = count of one‑punch days (only IN or only OUT) with posted≈10h (this month).\n\n"
+        "Rules:\n"
+        "- Use ONLY the provided employees; do not invent extra rows.\n"
+        "- Start from naive_factor * current; compare with previous month.\n"
+        "- forecast_* must be integers and NEVER below the current values.\n"
+        "- Cap extreme growth to reasonable bounds.\n"
+        "- Preserve the input list semantics (we will reorder by NID on our side).\n\n"
+        f"INPUT:\n{content}"
+    )
 
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
+
+        # Call gpt-5-mini with JSON mode
         resp = client.chat.completions.create(
             model="gpt-5-mini",
-            messages=[
-                {"role": "system", "content":
-                 "You are a data analyst. Forecast month-end CaseA and CaseB for each employee. "
-                 "Output STRICT JSON. No prose."},
-                {"role": "user", "content": f"INPUT:\n{content}"}
-            ],
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}],
+            # This model uses `max_completion_tokens` (not `max_tokens`)
             max_completion_tokens=800,
             response_format={"type": "json_object"},
         )
-        parsed = _json.loads(resp.choices[0].message.content)
+
+        raw = resp.choices[0].message.content if resp and resp.choices else ""
+        if not raw or not raw.strip():
+            log("❌ LLM forecast failed: empty response body from model.")
+            return None
+
+        # Try to parse JSON; if it fails, log a short preview
+        try:
+            parsed = _json.loads(raw)
+        except Exception as je:
+            preview = raw[:400].replace("\n", " ")
+            log(f"❌ LLM forecast JSON parse error: {je}; preview: {preview}")
+            return None
+
         items = parsed.get("items", [])
-        log(f"✅ LLM forecast returned {len(items)} employees.")
-        rows = []
+        log(f"✅ LLM forecast returned {len(items)} item(s).")
+
+        # Map by NID, then restore the original risky_sorted order
+        by_nid = {}
         for it in items:
-            rows.append({
-                "name": str(it.get("name") or ""),
-                "nid": str(it.get("nid") or ""),
-                "caseA": int(it.get("caseA", 0)),
-                "prev_caseA": int(it.get("prev_caseA", 0)),
-                "forecast_caseA": max(int(it.get("forecast_caseA", 0)), int(it.get("caseA", 0))),
-                "caseB": int(it.get("caseB", 0)),
-                "prev_caseB": int(it.get("prev_caseB", 0)),
-                "forecast_caseB": max(int(it.get("forecast_caseB", 0)), int(it.get("caseB", 0))),
-            })
-        return rows or None
+            try:
+                row = {
+                    "name": str(it.get("name") or ""),
+                    "nid": str(it.get("nid") or ""),
+                    "caseA": int(it.get("caseA", 0)),
+                    "prev_caseA": int(it.get("prev_caseA", 0)),
+                    "forecast_caseA": max(int(it.get("forecast_caseA", 0)), int(it.get("caseA", 0))),
+                    "caseB": int(it.get("caseB", 0)),
+                    "prev_caseB": int(it.get("prev_caseB", 0)),
+                    "forecast_caseB": max(int(it.get("forecast_caseB", 0)), int(it.get("caseB", 0))),
+                }
+                by_nid[row["nid"]] = row
+            except Exception as row_err:
+                log(f"⚠️ Skipping one malformed item from LLM: {row_err}")
+
+        ordered: List[Dict[str, Any]] = []
+        for e in focus:
+            r = by_nid.get(e.nid)
+            if r:
+                r["gap_h"] = round(float(e.sum_gap), 2)
+                ordered.append(r)
+
+        if not ordered:
+            log("⚠️ LLM forecast produced no matching NIDs after ordering; using fallback.")
+            return None
+
+        return ordered
+
     except Exception as e:
+        # Network/timeouts/HTTP error handling path
         log(f"❌ LLM forecast failed: {e}")
         return None
 
@@ -270,6 +337,7 @@ if __name__ == "__main__":
     )
     out = build_insights(dummy)
     log("OUTPUT:", out)
+
 
 
 
