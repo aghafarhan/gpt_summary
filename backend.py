@@ -19,7 +19,7 @@ from summarize_doc import (
 )
 from supplier_summary import generate_supplier_summary_excel
 from models import ProcurementRequest
-
+from punch_ai_risk import build_insights, Payload as RiskPayload
 
 
 TEMP_DIR = "temp_files"
@@ -154,3 +154,7 @@ async def chat_about_quotation(payload: ChatQuery):
         return {"answer": response.choices[0].message.content.strip()}
     except Exception as e:
         return {"error": str(e)}   
+
+@app.post("/summarize-ai-risk/")
+async def summarize_ai_risk(payload: RiskPayload):
+    return build_insights(payload)
