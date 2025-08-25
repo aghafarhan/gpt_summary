@@ -123,21 +123,42 @@ def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optio
     Returns ordered rows (matching risky_sorted order) or None on failure.
     """
     import json as _json
+    import time
+    import re
+
+    def _extract_first_json_object(text: str) -> Optional[dict]:
+        """Best-effort: pull the first {...} JSON object from a string."""
+        if not text:
+            return None
+        # quick scan for first balanced { ... }
+        start = text.find("{")
+        if start == -1:
+            return None
+        # simple brace counter
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    snippet = text[start:i+1]
+                    try:
+                        return _json.loads(snippet)
+                    except Exception:
+                        return None
+        return None
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         log("⚠️ No OPENAI_API_KEY found; skipping LLM forecast.")
         return None
 
-    # Scope / size hints
     top_n = int(os.getenv("LLM_FORECAST_TOPN", "20"))
     focus = risky_sorted[:top_n]
     log(f"🧠 Running LLM forecast for top {len(focus)} risky employees…")
 
-    # Naive factor for the model (days covered → month-end)
     factor_hint = _default_forecast_factor(payload.meta)
-
-    # Compact, deterministic input object
     content = {
         "meta": {
             "project": payload.meta.project_name or "-",
@@ -158,10 +179,9 @@ def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optio
         } for e in focus]
     }
 
-    # Build the strict JSON prompt
     system = (
         "You are a data analyst. Forecast month‑end CaseA and CaseB for each employee.\n"
-        "OUTPUT: STRICT JSON that matches the schema. No prose."
+        "Return STRICT JSON only that matches the schema below. Do not include prose, code fences, or comments."
     )
     user = (
         "Schema:\n"
@@ -175,11 +195,10 @@ def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optio
         "- caseA = count of days actual<9h while posted≈10h (this month).\n"
         "- caseB = count of one‑punch days (only IN or only OUT) with posted≈10h (this month).\n\n"
         "Rules:\n"
-        "- Use ONLY the provided employees; do not invent extra rows.\n"
-        "- Start from naive_factor * current; compare with previous month.\n"
+        "- Use ONLY the provided employees; do not add extra rows.\n"
+        "- Start from naive_factor * current and compare with previous month.\n"
         "- forecast_* must be integers and NEVER below the current values.\n"
-        "- Cap extreme growth to reasonable bounds.\n"
-        "- Preserve the input list semantics (we will reorder by NID on our side).\n\n"
+        "- Cap extreme growth to reasonable bounds.\n\n"
         f"INPUT:\n{content}"
     )
 
@@ -187,33 +206,42 @@ def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optio
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
 
-        # Call gpt-5-mini with JSON mode
-        resp = client.chat.completions.create(
-            model="gpt-5-mini",
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}],
-            # This model uses `max_completion_tokens` (not `max_tokens`)
-            max_completion_tokens=800,
-            response_format={"type": "json_object"},
-        )
+        def _call_once() -> str:
+            # Do NOT pass response_format; gpt-5-mini on chat.completions sometimes returns empty with it.
+            resp = client.chat.completions.create(
+                model="gpt-5-mini",
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": user}],
+                # leave temperature default (1) – model errors if set otherwise for some configs
+                # let the API choose token budget; the payload is tiny
+            )
+            return resp.choices[0].message.content if (resp and resp.choices) else ""
 
-        raw = resp.choices[0].message.content if resp and resp.choices else ""
+        raw = _call_once()
+        if not raw or not raw.strip():
+            log("⚠️ LLM forecast: empty content; retrying once…")
+            time.sleep(0.8)
+            raw = _call_once()
+
         if not raw or not raw.strip():
             log("❌ LLM forecast failed: empty response body from model.")
             return None
 
-        # Try to parse JSON; if it fails, log a short preview
+        # Parse JSON strictly; if it fails, try to salvage the first JSON object.
         try:
             parsed = _json.loads(raw)
         except Exception as je:
             preview = raw[:400].replace("\n", " ")
-            log(f"❌ LLM forecast JSON parse error: {je}; preview: {preview}")
-            return None
+            log(f"⚠️ JSON parse failed ({je}); trying to extract first JSON object. Preview: {preview}")
+            parsed = _extract_first_json_object(raw)
+            if parsed is None:
+                log("❌ Could not recover a valid JSON object from model output.")
+                return None
 
-        items = parsed.get("items", [])
+        items = parsed.get("items", []) if isinstance(parsed, dict) else []
         log(f"✅ LLM forecast returned {len(items)} item(s).")
 
-        # Map by NID, then restore the original risky_sorted order
+        # Reorder to match original focus order and attach gap_h
         by_nid = {}
         for it in items:
             try:
@@ -229,7 +257,7 @@ def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optio
                 }
                 by_nid[row["nid"]] = row
             except Exception as row_err:
-                log(f"⚠️ Skipping one malformed item from LLM: {row_err}")
+                log(f"⚠️ Skipping one malformed LLM item: {row_err}")
 
         ordered: List[Dict[str, Any]] = []
         for e in focus:
@@ -239,15 +267,15 @@ def _maybe_llm_forecast(payload: Payload, risky_sorted: List[Employee]) -> Optio
                 ordered.append(r)
 
         if not ordered:
-            log("⚠️ LLM forecast produced no matching NIDs after ordering; using fallback.")
+            log("⚠️ LLM forecast produced no matching NIDs after ordering; falling back.")
             return None
 
         return ordered
 
     except Exception as e:
-        # Network/timeouts/HTTP error handling path
         log(f"❌ LLM forecast failed: {e}")
         return None
+
 
 # ----------------------- LLM Forecast Summary -----------------------
 def maybe_llm_forecast_summary(meta: Meta, table_rows: List[Dict[str, Any]]) -> Optional[str]:
@@ -337,6 +365,7 @@ if __name__ == "__main__":
     )
     out = build_insights(dummy)
     log("OUTPUT:", out)
+
 
 
 
