@@ -190,40 +190,50 @@ def maybe_llm_forecast_summary(meta: Meta, table_rows: List[Dict[str, Any]]) -> 
         client = OpenAI(api_key=api_key)
         model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 
+        # Compact rows for the model (cap to 20 for speed)
         compact = [{
             "name": r["name"], "nid": r["nid"],
-            "caseA": r["caseA"], "prev_caseA": r["prev_caseA"], "forecast_caseA": r["forecast_caseA"],
-            "caseB": r["caseB"], "prev_caseB": r["prev_caseB"], "forecast_caseB": r["forecast_caseB"],
-            "gap_h": r.get("gap_h", 0.0)
-        }]  # small payload; we’ll slice below
-
-        compact = [{
-            "name": r["name"], "nid": r["nid"],
-            "caseA": r["caseA"], "prev_caseA": r["prev_caseA"], "forecast_caseA": r["forecast_caseA"],
-            "caseB": r["caseB"], "prev_caseB": r["prev_caseB"], "forecast_caseB": r["forecast_caseB"],
-            "gap_h": r.get("gap_h", 0.0)
+            "caseA": int(r["caseA"]), "prev_caseA": int(r["prev_caseA"]), "forecast_caseA": int(r["forecast_caseA"]),
+            "caseB": int(r["caseB"]), "prev_caseB": int(r["prev_caseB"]), "forecast_caseB": int(r["forecast_caseB"]),
+            "gap_h": float(r.get("gap_h", 0.0))
         } for r in table_rows[:20]]
 
-        topN = min(3, len(compact))  # never ask for more than we have
+        # Totals for clearer, numeric context
+        total_fc = sum(r["forecast_caseA"] + r["forecast_caseB"] for r in compact)
+        total_prev = sum(r["prev_caseA"] + r["prev_caseB"] for r in compact)
+        topN = min(3, len(compact))
+
+        # If there are no risky rows, short‑circuit with a deterministic line
+        if topN == 0:
+            return (
+                f"**{meta.project_name or '-'} – {meta.month} (vs {meta.prev_month or 'prev'})**\n"
+                "No employees meet the risk threshold this month. Continue routine monitoring."
+            )
 
         prompt = (
-            "You are an auditor. Produce a concise Markdown **forecast summary** of attendance FRAUD‑RISK.\n"
+            "You are an auditor. Produce a concise Markdown forecast summary of attendance FRAUD‑RISK.\n"
             "DEFINITIONS:\n"
             "- CaseA = days with actual<9h but posted≈10h (per employee, this month).\n"
             "- CaseB = one‑punch days (only IN or only OUT) with posted≈10h (per employee, this month).\n"
-            "GUIDELINES:\n"
+            "STYLE RULES (STRICT):\n"
             "- Use ONLY the provided rows; do NOT invent employees or placeholders.\n"
-            "- Neutral numeric tone: e.g., “A 3→4, B 7→7”. No HR coaching language.\n"
-            "- Keep ≤120 words. No tables.\n"
-            "OUTPUT structure:\n"
-            "• One line with project and months.\n"
-            "• Bullet: Total forecasted load = sum of (forecast_A + forecast_B) across rows; if possible, mention previous totals.\n"
-            "• 1–3 bullets of notable increases/decreases (largest deltas vs previous month) with numbers.\n"
-            f"• **Watchlist ({topN})** — list exactly {topN} names with: “A cur→Â, B cur→B̂, gap Xh”.\n"
-            "• 2–3 concrete actions about investigating timecards/one‑punch patterns (no generic platitudes).\n\n"
-            f"Project: {meta.project_name or '-'}  |  Month: {meta.month} vs {meta.prev_month or 'prev'}\n"
-            f"Rows JSON: {compact}"
-        )
+            "- Use neutral numeric tone with CaseA/CaseB terms (never say 'absence' or 'attendance problems').\n"
+            "- Keep ≤120 words. No tables. No headings. Use 4–6 short bullets only.\n"
+            "- Watchlist must list EXACTLY {N} employees; do not add notes about missing items.\n"
+            "CONTENT RULES:\n"
+            "• Line 1: **{Project} – {Month} (vs {Prev})**\n"
+            "• Bullet: Total forecasted load = {TotalFc} risk days; previous total = {TotalPrev}.\n"
+            "• 1–2 bullets: notable increases/decreases vs previous month (use format 'Name: A cur→Â, B cur→B̂').\n"
+            "• Bullet: **Watchlist ({N})** — Name1: A cur→Â, B cur→B̂, gap Xh; Name2: ...\n"
+            "• 1–2 action bullets: investigations (timecards/machine logs), one‑punch checks, supervisor review thresholds.\n"
+            "\n"
+            f"Project: {meta.project_name or '-'}\n"
+            f"Month: {meta.month}\n"
+            f"Prev: {meta.prev_month or 'prev'}\n"
+            f"Rows JSON: {compact}\n"
+        ).replace("{N}", str(topN)).replace("{Project}", meta.project_name or "-") \
+         .replace("{Month}", meta.month).replace("{Prev}", meta.prev_month or "prev") \
+         .replace("{TotalFc}", str(total_fc)).replace("{TotalPrev}", str(total_prev))
 
         resp = client.chat.completions.create(
             model=model,
@@ -284,4 +294,5 @@ def build_insights(payload: Payload) -> Dict[str, Any]:
         "forecast_summary_md": summary_md,
         "used_llm_summary": bool(summary_md),
     }
+
 
