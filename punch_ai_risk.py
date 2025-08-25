@@ -14,11 +14,9 @@ from pydantic import BaseModel, Field
 # ────────────────────────────────────────────────────────────────────────────────
 # Logging setup
 # ────────────────────────────────────────────────────────────────────────────────
-VERBOSE_MODE = __name__ == "__main__"   # Only print logs when run directly
 
 def log(*args, **kwargs):
-    if VERBOSE_MODE:
-        print(*args, **kwargs)
+    print(*args, **kwargs, flush=True)
 
 # ----------------------- Models -----------------------
 class Employee(BaseModel):
@@ -274,3 +272,4 @@ if __name__ == "__main__":
     )
     out = build_insights(dummy)
     log("OUTPUT:", out)
+
