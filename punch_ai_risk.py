@@ -214,18 +214,19 @@ def maybe_llm_forecast_summary(meta: Meta, table_rows: List[Dict[str, Any]]) -> 
         } for r in table_rows[:10]]
 
         prompt = (
-            "You are a compliance analyst. Write a short Markdown summary (~100 words) "
-            "of attendance risk forecasts. Use only provided employees.\n\n"
-            "Include:\n"
+            "Write a concise Markdown summary (~120 words) of attendance risk forecasts. "
+            "Format the output as clear bullet points. "
+            "Cover:\n"
             "- Total risky employees\n"
-            "- Notable increases vs previous month\n"
-            "- Top 2–3 to watch with numeric CaseA/CaseB forecast\n"
-            "- 2 action points (investigate logs, supervisor review)\n\n"
+            "- Notable forecast increases/decreases compared to previous month\n"
+            "- 2–3 recommended actions\n\n"
+            "Do NOT include a watchlist of employee names (they already appear in the table). "
+            "Keep it professional and concise.\n\n"
             f"Project: {meta.project_name or '-'}\n"
             f"Month: {meta.month} vs {meta.prev_month or 'prev'}\n"
             f"Rows: {compact}"
         )
-
+        
         resp = client.chat.completions.create(
             model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
@@ -238,15 +239,17 @@ def maybe_llm_forecast_summary(meta: Meta, table_rows: List[Dict[str, Any]]) -> 
 
 def fallback_forecast_summary(meta: Meta, table_rows: List[Dict[str, Any]]) -> str:
     risky_count = len(table_rows)
-    ranked = sorted(table_rows, key=lambda r: (r["forecast_caseA"] + r["forecast_caseB"], r.get("gap_h", 0.0)), reverse=True)
-    top3 = [r["name"] for r in ranked[:3]]
+    actions = [
+        "Audit timecards and device logs of high-forecast employees.",
+        "Trigger supervisor review when CaseA or CaseB ≥ 5 mid-month.",
+        "Enable daily anomaly alerts for one-punch patterns."
+    ]
     parts = [
         f"**{meta.project_name or '-'} – {meta.month} (vs {meta.prev_month or 'prev'})**",
-        f"Risky employees: **{risky_count}**.",
-    ]
-    if top3:
-        parts.append("Watchlist: " + ", ".join(top3) + ".")
-    parts.append("Actions: - Audit top forecasts; - Supervisor review when A or B ≥ 5; - Enable daily one‑punch alerts.")
+        f"- Risky employees: **{risky_count}**",
+        f"- Total forecast gap risk: ~{sum(r['gap_h'] for r in table_rows):.2f}h",
+        "### Recommended Actions:",
+    ] + [f"- {a}" for a in actions]
     return "\n".join(parts)
 
 # ----------------------- Public API (for backend.py to call) -----------------------
@@ -292,6 +295,7 @@ def build_insights(payload: Payload) -> Dict[str, Any]:
         "used_llm_forecast": llm_rows is not None,
         "used_llm_summary": summary_md is not None,
     }
+
 
 
 
