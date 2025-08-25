@@ -111,8 +111,8 @@ def build_forecast_table(table_rows: List[Dict[str, Any]]) -> str:
     for r in table_rows:
         lines.append(
             f"| {r['name']} | {r['nid']} | "
-            f"{r['prev_caseA']}→{r['caseA']}→{r['forecast_caseA']} | "
-            f"{r['prev_caseB']}→{r['caseB']}→{r['forecast_caseB']} | "
+            f"{r['prev_caseA']}→**{r['caseA']}**→{r['forecast_caseA']} | "
+            f"{r['prev_caseB']}→**{r['caseB']}**→{r['forecast_caseB']} | "
             f"{r.get('gap_h', 0.0):.2f} |"
         )
     return header + "\n".join(lines)
@@ -269,6 +269,7 @@ if __name__ == "__main__":
     )
     out = build_insights(dummy)
     log("OUTPUT:", out)
+
 
 
 
