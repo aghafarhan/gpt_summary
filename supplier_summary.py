@@ -1,15 +1,14 @@
 import openpyxl
 from openpyxl.styles import Alignment
-from dotenv import load_dotenv
-from openai import OpenAI
 import os
 import re
 from typing import List
 
+from llm_client import get_chat_model, get_llm_client, unwrap_llm_text
+
 
 def generate_supplier_summary_excel(items: List[dict], output_file: str):
-    load_dotenv()
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    client = get_llm_client()
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -56,10 +55,10 @@ Return as a markdown table with:
 """
 
         response = client.chat.completions.create(
-            model="gpt-4o-search-preview",
+            model=get_chat_model("gpt-5.4"),
             messages=[{"role": "user", "content": prompt}]
         )
-        markdown = response.choices[0].message.content.strip()
+        markdown = unwrap_llm_text(response.choices[0].message.content)
 
         print(markdown)
 

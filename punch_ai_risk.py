@@ -11,6 +11,8 @@ from datetime import date
 from calendar import monthrange
 from pydantic import BaseModel, Field
 
+from llm_client import extract_json_text, get_chat_model, get_llm_client, has_llm_configuration
+
 # ────────────────────────────────────────────────────────────────────────────────
 # Logging setup
 # ────────────────────────────────────────────────────────────────────────────────
@@ -129,9 +131,8 @@ def _maybe_llm_forecast_and_summary(payload: Payload, risky_sorted: List[Employe
     """
     import time
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        log("⚠️ No OPENAI_API_KEY found; skipping LLM.")
+    if not has_llm_configuration():
+        log("⚠️ No LLM endpoint or API key found; skipping LLM.")
         return None
 
     top_n = int(os.getenv("LLM_FORECAST_TOPN", "20"))
@@ -177,16 +178,15 @@ def _maybe_llm_forecast_and_summary(payload: Payload, risky_sorted: List[Employe
     user = f"INPUT:\n{_json.dumps(content, ensure_ascii=False)}"
 
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
+        client = get_llm_client()
 
         def _call_once() -> str:
             resp = client.chat.completions.create(
-                model="gpt-4.1",
+                model=get_chat_model("gpt-5.4"),
                 messages=[{"role": "system", "content": system},
                           {"role": "user", "content": user}],
             )
-            return resp.choices[0].message.content if (resp and resp.choices) else ""
+            return extract_json_text(resp.choices[0].message.content) if (resp and resp.choices) else ""
 
         raw = _call_once()
         if not raw.strip():

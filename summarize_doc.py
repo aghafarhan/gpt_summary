@@ -1,10 +1,11 @@
 # summarize_doc.py
 """
-Module for extracting text from PDF, DOCX, and TXT files,
-summarizing it using GPT, and saving the summary to Excel.
+Module for extracting text from PDF, DOCX, and TXT files
+and summarizing them using an OpenAI-compatible model.
 """
 import os
 import re
+import time
 import pdfplumber
 import pytesseract
 from PIL import Image
@@ -18,7 +19,7 @@ from openpyxl.styles import PatternFill
 
 from dotenv import load_dotenv
 load_dotenv()
-from openai import OpenAI
+from llm_client import get_chat_model, get_llm_client, unwrap_llm_text
 
 
 VERBOSE_MODE = __name__ == "__main__"  # True only if run locall
@@ -29,13 +30,10 @@ def log(*args, **kwargs):
 
 
 # ────────────────────────────────────────────────────────────────────────────────
-# 1.  Initialise the OpenAI client
+# 1.  Initialise the OpenAI-compatible client
 # ────────────────────────────────────────────────────────────────────────────────
 
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY")            
-)
-MODEL = "gpt-4.1"                                   # change to "4o" for faster usage, but may hallucinate
+MODEL = "gpt-5.4"
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -110,30 +108,140 @@ def canonical_key(desc: str) -> str:
 
 def extract_text_from_pdf(path: str) -> str:
     """
-    • Try to read the PDF’s text layer with pdfplumber.
-    • If that returns nothing on every page, fall back to OCR.
-    • Every line (from either route) is piped through `normalise_description`
-      so the downstream prompt sees tidy material descriptions.
+    Per-page extraction strategy:
+    1. Extract free text with pdfplumber (normalised through canonical_key).
+    2. Extract tables with pdfplumber (rows joined as pipe-separated text).
+    3. If a page yields nothing from either route, fall back to Tesseract OCR.
     """
-    import pdfplumber, pytesseract
-    from PIL import Image
-
     out = []
 
     with pdfplumber.open(path) as pdf:
-        had_text = False
         for page in pdf.pages:
+            page_lines = []
+
+            # 1. Text layer
             raw = page.extract_text() or ""
-            if raw.strip():
-                had_text = True
             for ln in raw.splitlines():
                 pretty = normalise_description(ln)
                 if not pretty:
                     continue
                 key = canonical_key(pretty)
-                out.append(f"{key} | {pretty}")
+                page_lines.append(f"{key} | {pretty}")
+
+            # 2. Structured tables (critical for price quotations)
+            tables = page.extract_tables() or []
+            for table in tables:
+                for row in table:
+                    if not row:
+                        continue
+                    row_text = " | ".join(str(cell or "").strip() for cell in row)
+                    if row_text.strip(" |"):
+                        page_lines.append(row_text)
+
+            # 3. OCR fallback (only when page has no selectable content)
+            if not page_lines:
+                try:
+                    img = page.to_image(resolution=300).original
+                    ocr_raw = pytesseract.image_to_string(img, config="--psm 6 --oem 3")
+                    for ln in ocr_raw.splitlines():
+                        pretty = normalise_description(ln)
+                        if pretty:
+                            key = canonical_key(pretty)
+                            page_lines.append(f"{key} | {pretty}")
+                except Exception:
+                    pass
+
+            out.extend(page_lines)
 
     return "\n".join(out)
+
+
+def extract_text_from_txt(path: str) -> str:
+    for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+        try:
+            with open(path, "r", encoding=encoding) as file_obj:
+                return file_obj.read()
+        except UnicodeDecodeError:
+            continue
+    raise UnicodeDecodeError("text", b"", 0, 1, "Unable to decode text file")
+
+
+def extract_text_from_docx(path: str) -> str:
+    document = Document(path)
+    parts = []
+    # Paragraphs
+    for paragraph in document.paragraphs:
+        if paragraph.text.strip():
+            parts.append(paragraph.text)
+    # Tables (quotation documents often use Word tables for prices)
+    for table in document.tables:
+        for row in table.rows:
+            row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+            if row_text:
+                parts.append(row_text)
+    return "\n".join(parts)
+
+
+def extract_text_from_msg(path: str) -> str:
+    """
+    Extract text from an Outlook .msg email file.
+    Also recursively extracts any PDF / DOCX / TXT attachments embedded in the email.
+    """
+    try:
+        import extract_msg
+    except ImportError:
+        raise ValueError("extract-msg is not installed. Run: pip install extract-msg")
+
+    import tempfile
+    with extract_msg.Message(path) as msg:
+        parts = []
+
+        if msg.subject:
+            parts.append(f"Subject: {msg.subject}")
+        if msg.sender:
+            parts.append(f"From: {msg.sender}")
+        if msg.date:
+            parts.append(f"Date: {msg.date}")
+        body = (msg.body or "").strip()
+        if body:
+            parts.append(body)
+
+        for att in (msg.attachments or []):
+            name = att.longFilename or att.shortFilename or ""
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in (".pdf", ".docx", ".txt"):
+                continue
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                    tmp.write(att.data)
+                    tmp_path = tmp.name
+                att_text = extract_text_from_file(tmp_path)
+                if att_text.strip():
+                    parts.append(f"\n--- ATTACHMENT: {name} ---\n{att_text}")
+            except Exception:
+                pass
+            finally:
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
+
+    return "\n".join(parts)
+
+
+def extract_text_from_file(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        return extract_text_from_pdf(path)
+    if ext == ".txt":
+        return extract_text_from_txt(path)
+    if ext == ".docx":
+        return extract_text_from_docx(path)
+    if ext == ".msg":
+        return extract_text_from_msg(path)
+    raise ValueError(f"Unsupported file type: {ext}")
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -175,8 +283,11 @@ Copy wording exactly; leave blank if absent.
 {combined_text}
 --- END DOCUMENTS ---
 """
-    response = client.chat.completions.create(
-        model=MODEL,
+    print(f"[LLM] Sending request to model '{get_chat_model(MODEL)}' …")
+    _t0 = time.perf_counter()
+    stream = get_llm_client().chat.completions.create(
+        model=get_chat_model(MODEL),
+        stream=True,
         messages=[
             {
                 "role": "system",
@@ -184,14 +295,25 @@ Copy wording exactly; leave blank if absent.
                 (
                 "You are a document-summariser. Your job is to summarise supplier "
                 "quotations into markdown tables. For every material in a row, list the unit "
-                "price/Rate quoted by each supplier across the documents. Also make sure that all the materials is listed even if they are not comparable. No extra prose—"
-                "output only the required tables."
+                "price/Rate quoted by each supplier across the documents. "
+                "Documents may be bilingual (Arabic + English) or contain pipe-separated rows — treat them all as valid input. "
+                "Preserve currency symbols and units (SAR, USD, pcs, sheets, m², kg, etc.) exactly as written. "
+                "Make sure ALL materials are listed even if not comparable across suppliers. "
+                "No extra prose — output only the required tables."
                 )
             },
             {"role": "user", "content": prompt},
         ],
     )
-    return response.choices[0].message.content
+    chunks = []
+    for chunk in stream:
+        delta = chunk.choices[0].delta.content or ""
+        if delta:
+            print(delta, end="", flush=True)
+            chunks.append(delta)
+    print()  # newline after stream ends
+    print(f"[LLM] Response received in {time.perf_counter() - _t0:.2f}s")
+    return unwrap_llm_text("".join(chunks))
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -228,79 +350,8 @@ def markdown_table_to_df(md_block: str) -> pd.DataFrame:
     return pd.DataFrame(fixed_body, columns=header)
 
 
-# ────────────────────────────────────────────────────────────────────────────────
-# 5.  Save tables to Excel (uses the robust parser & never closes empty wb)
-# ────────────────────────────────────────────────────────────────────────────────
-
-def save_summary_to_excel(summary_text: str,
-                          output_path: str = "combined_summary.xlsx") -> None:
-
-    blocks = [b for b in summary_text.split("\n\n") if "|" in b and "-" in b]
-    if not blocks:
-        log("⚠️  GPT returned no markdown tables.")
-        return
-
-    start_row = 0
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        for i, block in enumerate(blocks):
-            try:
-                df = markdown_table_to_df(block)
-            except Exception as e:
-                log(f"⚠️  Skipping one table – parse error: {e}")
-                continue
-
-            df.to_excel(writer, sheet_name="Summary",
-                        index=False, startrow=start_row)
-
-            # Grand-total logic only for the first (materials) table
-            if i == 0:
-                total_row = [""] * len(df.columns)
-                total_row[0] = "Grand Total"
-                for idx, col in enumerate(df.columns):
-                    if "Total" in col:
-                        nums = pd.to_numeric(df[col], errors="coerce")
-                        sm   = nums.dropna().sum()
-                        total_row[idx] = round(sm, 2) if sm else ""
-                pd.DataFrame([total_row], columns=df.columns).to_excel(
-                    writer, sheet_name="Summary",
-                    index=False, startrow=start_row + len(df) + 1
-                )
-                start_row += len(df) + 5
-            else:
-                start_row += len(df) + 4
-
-    # Re-open for colouring – guarantee at least one sheet exists
-    wb = load_workbook(output_path)
-    ws = wb["Summary"]
-
-    green  = PatternFill("solid", fgColor="C6EFCE")
-    yellow = PatternFill("solid", fgColor="FFF9C4")
-
-    # low-price highlight for first table only
-    end_row = next((r for r in range(2, ws.max_row + 1)
-                    if all((ws.cell(r, c).value in (None, "") for c in range(1, ws.max_column + 1)))), ws.max_row)
-
-    for r in ws.iter_rows(min_row=2, max_row=end_row - 1):
-        numeric = [(c, float(c.value))
-                   for c in r[2:]
-                   if isinstance(c.value, (int, float, str))
-                   and str(c.value).replace('.', '', 1).isdigit()]
-        if numeric:
-            low = min(v for _, v in numeric)
-            for cell, val in numeric:
-                if val == low:
-                    cell.fill = green
-
-    # yellow grand-total row (last row)
-    for cell in ws[ws.max_row]:
-        cell.fill = yellow
-
-    wb.save(output_path)
-    log(f"✅ Excel summary saved → {output_path}")
-
-
 # ───────────────────────────────────────────────────────────────────────────────────────────
-# 6.  Run_local_test: read all files in folder, send to GPT, save Excel (NOT USED IN BACKEND)
+# 5.  Run_local_test: read all files in folder and print the markdown summary
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
 def run_local_test():
@@ -322,10 +373,7 @@ def run_local_test():
         path = os.path.join(folder, f)
         log(f"   ─ reading {f}")
         try:
-            ext = os.path.splitext(f)[1].lower()
-            if ext == ".pdf":
-                txt = extract_text_from_pdf(path) 
-                
+            txt = extract_text_from_file(path)
             combined += f"\n\n--- FILE: {f} ---\n\n{txt}"
         except Exception as exc:
             log(f"     ⚠️ {f}: {exc}")
@@ -339,7 +387,6 @@ def run_local_test():
     log("✅ GPT returned markdown tables\n")
 
     log(md_summary)               # show in console
-    save_summary_to_excel(md_summary)
 
 
 if __name__ == "__main__":

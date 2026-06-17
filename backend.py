@@ -1,7 +1,7 @@
 # backend.py
 """
 FastAPI backend for summarizing quotations from PDF, DOCX, and TXT files.
-It extracts text, summarizes it using GPT, and provides downloadable Excel summaries.
+It extracts text and summarizes it using an OpenAI-compatible model.
 """
 import os
 import shutil
@@ -12,10 +12,9 @@ from pydantic import BaseModel
 import uuid
 import logging
 import traceback
-from openai import OpenAI
+from llm_client import get_chat_model, get_llm_client, unwrap_llm_text
 from summarize_doc import (
-    extract_text_from_pdf, summarize_text_with_gpt,
-    markdown_table_to_df, save_summary_to_excel
+    extract_text_from_file, summarize_text_with_gpt, markdown_table_to_df, 
 )
 from supplier_summary import generate_supplier_summary_excel
 from models import ProcurementRequest
@@ -57,10 +56,6 @@ class ChatQuery(BaseModel):
     query: str
     context: str
     
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY")            
-)
-    
     
 # ─────────────────────────────────────────────────────────────
 # Main Endpoint
@@ -77,10 +72,10 @@ async def summarize_quotations(files: list[UploadFile] = File(...)):
             shutil.copyfileobj(uploaded_file.file, f)
 
         try:
-            ext = os.path.splitext(uploaded_file.filename)[1].lower()
-            if ext == ".pdf":
-                txt = extract_text_from_pdf(temp_path)
+            txt = extract_text_from_file(temp_path)
             combined_text += f"\n\n--- FILE: {uploaded_file.filename} ---\n\n{txt}"
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
         finally:
             os.remove(temp_path)
 
@@ -90,10 +85,6 @@ async def summarize_quotations(files: list[UploadFile] = File(...)):
     logger.info("🧠 Sending text to GPT summarizer")
     md_summary = summarize_text_with_gpt(combined_text)
 
-    # Save Excel summary
-    excel_filename = f"quotation_summary_{uuid.uuid4().hex[:8]}.xlsx"
-    excel_filepath = os.path.join(TEMP_DIR, excel_filename)
-    save_summary_to_excel(md_summary, output_path=excel_filepath)
 
     # Convert markdown tables to JSON
     summary_blocks = [b for b in md_summary.split("\n\n") if "|" in b and "-" in b]
@@ -106,20 +97,8 @@ async def summarize_quotations(files: list[UploadFile] = File(...)):
 
     return {
         "summary_tables": tables_json,
-        "excel_download_path": f"/download/{excel_filename}"
-    }
-
-# ─────────────────────────────────────────────────────────────
-# Download Endpoint
-# ─────────────────────────────────────────────────────────────
-
-@app.get("/download/{filename}")
-async def download_excel(filename: str):
-    file_path = os.path.join(TEMP_DIR, filename)
-    if not os.path.exists(file_path):
-        return JSONResponse({"error": "File not found."}, status_code=404)
-    return FileResponse(path=file_path, filename="quotation_summary.xlsx")
-    
+        "summary_markdown": md_summary,
+    }  
     
 @app.post("/generate-supplier-summary/")
 async def generate_supplier_summary(data: ProcurementRequest):
@@ -147,11 +126,11 @@ async def chat_about_quotation(payload: ChatQuery):
     prompt = f"""You are a intelligent Purchase Officer assistant. Given this quotation summary:\n\n{payload.context}\n\nAnswer this question:\n{payload.query}"""
     
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
+        response = get_llm_client().chat.completions.create(
+            model=get_chat_model("gpt-5.4"),
             messages=[{"role": "user", "content": prompt}]
         )
-        return {"answer": response.choices[0].message.content.strip()}
+        return {"answer": unwrap_llm_text(response.choices[0].message.content)}
     except Exception as e:
         return {"error": str(e)}   
 
