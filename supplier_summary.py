@@ -2,9 +2,21 @@ import openpyxl
 from openpyxl.styles import Alignment
 import os
 import re
+from urllib.parse import urlparse
+import httpx
 from typing import List
 
 from llm_client import get_chat_model, get_llm_client, unwrap_llm_text
+
+
+def verify_url(url: str) -> bool:
+    """Verify that a candidate website is reachable before exporting it."""
+    try:
+        with httpx.Client(timeout=8.0, follow_redirects=True) as http:
+            response = http.get(url, headers={"User-Agent": "ProcurementResearch/1.0"})
+            return response.status_code < 400 and response.url.scheme in {"http", "https"}
+    except httpx.HTTPError:
+        return False
 
 
 def generate_supplier_summary_excel(items: List[dict], output_file: str):
@@ -21,18 +33,21 @@ def generate_supplier_summary_excel(items: List[dict], output_file: str):
         item = entry["item_name"]
 
         prompt = f"""
-You are a senior procurement officer at a construction company in Saudi Arabia.
+You are a procurement research assistant with access to live web search. Search the web before
+answering. Never invent a supplier, URL, price, MOQ, location, or product. Use `Quote Required`
+or `Not Found` when the web evidence does not contain the requested information.
 
-Your job is to research and acquire high-quality materials from **real suppliers located in Saudi Arabia only**. You are preparing a procurement summary report for internal use.
+Your job is to research and identify reliable suppliers for the requested item. The business may operate in construction, hospitality, restaurants, retail, or manufacturing.
 
-### MATERIAL:
-- Item: {item} Saudi Arabia
+### REQUESTED ITEM:
+- Item: {item}
+- Primary market: Saudi Arabia
 
 ### TASK:
 1. For this specific material, determine the most relevant supplier types:
-   - If it is a **raw or industrial product** (e.g., steel, rebar, chemicals), focus on **local manufacturers, factories, official stockists, and authorized dealers**.
-   - Avoid generic trading companies unless no direct manufacturer, dealer, or stockist is available.
-2. Search ONLY for **industrial supplier websites, manufacturer product pages, official stockists, authorized local dealers** based in or shipping to Saudi Arabia and **perform an in-depth search, scour multiple pages**.
+   - Use manufacturers, distributors, wholesalers, authorized dealers, food-service suppliers, or equipment specialists as appropriate.
+   - Avoid generic trading companies unless no more relevant supplier is available.
+2. Select suppliers only from the verified search results above.
 3. Return **exactly 10 Saudi-based suppliers** who offer this item or a very close variant.
 4. Additionally, include **1 supplier from China** that ships internationally to Saudi Arabia.
 5. For each supplier, collect:
@@ -54,11 +69,12 @@ Return as a markdown table with:
 | # | Supplier | Price Estimate | Packaging / MOQ | Website Link |
 """
 
-        response = client.chat.completions.create(
-            model=get_chat_model("gpt-5.4"),
-            messages=[{"role": "user", "content": prompt}]
+        response = client.responses.create(
+            model=get_chat_model("gpt-5.6"),
+            tools=[{"type": "web_search"}],
+            input=prompt,
         )
-        markdown = unwrap_llm_text(response.choices[0].message.content)
+        markdown = unwrap_llm_text(response.output_text)
 
         print(markdown)
 
@@ -74,7 +90,9 @@ Return as a markdown table with:
         current_row += 1
 
         # Parse table rows
-        rows = [r.strip("|").split("|") for r in markdown.split("\n") if "|" in r][1:]
+        rows = [r.strip("|").split("|") for r in markdown.split("\n") if "|" in r]
+        rows = [r for r in rows if not all(set(v.strip()) <= {"-", ":"} for v in r)]
+        rows = rows[1:]
 
         for i, row in enumerate(rows):
             if len(row) < len(headers) - 1:
@@ -96,16 +114,22 @@ Return as a markdown table with:
                     if match:
                         display_text = match.group(1).strip()
                         url = match.group(2).strip()
-                        cell.value = display_text
-                        cell.hyperlink = url
-                        cell.style = "Hyperlink"
+                        if verify_url(url):
+                            cell.value = display_text
+                            cell.hyperlink = url
+                            cell.style = "Hyperlink"
+                        else:
+                            cell.value = "Not Found"
                     else:
                         match = re.search(r"(https?://[^\\s)]+)", cell_val)
                         if match:
                             url = match.group(1).strip()
-                            cell.value = url
-                            cell.hyperlink = url
-                            cell.style = "Hyperlink"
+                            if verify_url(url):
+                                cell.value = url
+                                cell.hyperlink = url
+                                cell.style = "Hyperlink"
+                            else:
+                                cell.value = "Not Found"
                         else:
                             cell.value = cell_val
                 else:

@@ -14,7 +14,7 @@ import logging
 import traceback
 from llm_client import get_chat_model, get_llm_client, unwrap_llm_text
 from summarize_doc import (
-    extract_text_from_file, summarize_text_with_gpt, markdown_table_to_df, 
+    extract_text_from_file, format_document_for_llm, summarize_text_with_gpt, markdown_table_to_df, 
 )
 from supplier_summary import generate_supplier_summary_excel
 from models import ProcurementRequest
@@ -23,6 +23,7 @@ from punch_ai_risk import build_insights, Payload as RiskPayload
 
 TEMP_DIR = "temp_files"
 os.makedirs(TEMP_DIR, exist_ok=True)
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".msg", ".eml", ".xlsx"}
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -67,20 +68,27 @@ async def summarize_quotations(files: list[UploadFile] = File(...)):
     logger.info(f"📥 Received {len(files)} file(s)")
 
     for uploaded_file in files:
+        extension = os.path.splitext(uploaded_file.filename or "")[1].lower()
+        if extension not in SUPPORTED_EXTENSIONS:
+            logger.warning("Ignoring unsupported file: %s", uploaded_file.filename)
+            continue
         temp_path = os.path.join(TEMP_DIR, f"{uuid.uuid4()}_{uploaded_file.filename}")
         with open(temp_path, "wb") as f:
             shutil.copyfileobj(uploaded_file.file, f)
 
         try:
             txt = extract_text_from_file(temp_path)
-            combined_text += f"\n\n--- FILE: {uploaded_file.filename} ---\n\n{txt}"
+            combined_text += format_document_for_llm(uploaded_file.filename, txt)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         finally:
             os.remove(temp_path)
 
     if not combined_text.strip():
-        return JSONResponse({"error": "No text extracted."}, status_code=400)
+        return JSONResponse(
+            {"error": "No supported quotation files were uploaded."},
+            status_code=400
+        )
 
     logger.info("🧠 Sending text to GPT summarizer")
     md_summary = summarize_text_with_gpt(combined_text)
@@ -90,8 +98,11 @@ async def summarize_quotations(files: list[UploadFile] = File(...)):
     summary_blocks = [b for b in md_summary.split("\n\n") if "|" in b and "-" in b]
     tables_json = []
     for block in summary_blocks:
-        df = markdown_table_to_df(block)
-        tables_json.append(df.fillna("").to_dict(orient="records"))
+        try:
+            df = markdown_table_to_df(block)
+            tables_json.append(df.fillna("").to_dict(orient="records"))
+        except ValueError:
+            logger.warning("Model returned an invalid markdown table; skipping it")
     
     logger.info(f"✅ Returning {len(tables_json)} summary table(s)")
 

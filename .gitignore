@@ -1,5 +1,27 @@
 .env
+.env.*
+!.env.example
+
+# Python caches and local tooling
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+venv/
+.venv/
+env/
+
+# Generated/local application data
 *.xlsx
-/quotations
+temp_files/
+quotations/
+
+# Local logs and OS/editor files
+*.log
+.DS_Store
+Thumbs.db
+.vscode/

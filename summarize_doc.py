@@ -6,6 +6,10 @@ and summarizing them using an OpenAI-compatible model.
 import os
 import re
 import time
+import email
+from email import policy
+from email.parser import BytesParser
+import tempfile
 import pdfplumber
 import pytesseract
 from PIL import Image
@@ -29,11 +33,73 @@ def log(*args, **kwargs):
         print(*args, **kwargs)
 
 
+def clean_model_markdown(text: str) -> str:
+    """Remove server-log lines if terminal output was mixed into model text."""
+    kept = []
+    for line in (text or "").splitlines():
+        value = line.strip()
+        if value.startswith("INFO:") or value.startswith("[LLM]"):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def extract_document_metadata(text: str) -> dict:
+    """Extract high-value quotation metadata before the LLM compares items."""
+    source = text or ""
+    metadata = {
+        "customer": "",
+        "quotation_number": "",
+        "possible_supplier": "",
+        "payment_terms": "",
+        "validity": "",
+    }
+
+    customer = re.search(r"(?im)^\s*Customer Name\s*[:/]?\s*(.+)$", source)
+    if customer:
+        metadata["customer"] = customer.group(1).strip()
+
+    quotation = re.search(r"(?im)\b(?:Number|Qtn\s*No)\s*:?\s*([A-Z0-9][A-Z0-9-]+)", source)
+    if quotation:
+        metadata["quotation_number"] = quotation.group(1).strip()
+
+    account = re.search(r"(?im)ACCOUNT NAME\s*:\s*([^|\n]+)", source)
+    regards = re.search(r"(?ims)WITH BEST REGARDS,?\s*\n\s*([^\n]+)", source)
+    if account:
+        metadata["possible_supplier"] = account.group(1).strip()
+    elif regards:
+        candidate = regards.group(1).strip()
+        # Prefer the complete company/location phrase on the right side of
+        # pipe-separated extraction output, not a truncated normalized token.
+        if "|" in candidate:
+            candidate = candidate.split("|")[-1].strip()
+        metadata["possible_supplier"] = re.split(r"\s+-\s+", candidate, maxsplit=1)[0].strip()
+
+    payment = re.search(r"(?im)(?:\*\s*)?Payment\s*:\s*([^\n]+)", source)
+    if payment:
+        metadata["payment_terms"] = payment.group(1).split("|")[-1].strip()
+
+    validity = re.search(r"(?im)(?:\*\s*)?Validity\s*:\s*([^\n]+)", source)
+    if validity:
+        metadata["validity"] = validity.group(1).split("|")[-1].strip()
+
+    return metadata
+
+
+def format_document_for_llm(filename: str, text: str) -> str:
+    metadata = extract_document_metadata(text)
+    metadata_lines = "\n".join(f"{key}: {value or 'Not found'}"
+                                for key, value in metadata.items())
+    return (f"\n\n--- BEGIN DOCUMENT: {filename} ---\n"
+            f"DOCUMENT METADATA:\n{metadata_lines}\n"
+            f"DOCUMENT TEXT:\n{text}\n--- END DOCUMENT: {filename} ---")
+
+
 # ────────────────────────────────────────────────────────────────────────────────
 # 1.  Initialise the OpenAI-compatible client
 # ────────────────────────────────────────────────────────────────────────────────
 
-MODEL = "gpt-5.4"
+MODEL = "gpt-5.6"
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -151,7 +217,11 @@ def extract_text_from_pdf(path: str) -> str:
                 except Exception:
                     pass
 
-            out.extend(page_lines)
+            # Preserve page boundaries so the model and downstream reviewers can
+            # identify where each extracted value came from.
+            if page_lines:
+                out.append(f"--- PAGE {page.page_number or len(out) + 1} ---")
+                out.extend(page_lines)
 
     return "\n".join(out)
 
@@ -182,6 +252,65 @@ def extract_text_from_docx(path: str) -> str:
     return "\n".join(parts)
 
 
+def extract_text_from_xlsx(path: str) -> str:
+    """Extract worksheet names and rows while preserving column boundaries."""
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    parts = []
+    try:
+        for worksheet in workbook.worksheets:
+            parts.append(f"--- SHEET: {worksheet.title} ---")
+            for row in worksheet.iter_rows(values_only=True):
+                values = ["" if value is None else str(value).strip() for value in row]
+                if any(values):
+                    parts.append(" | ".join(values))
+    finally:
+        workbook.close()
+    return "\n".join(parts)
+
+
+def _extract_email_part(part) -> str:
+    if part.get_content_disposition() == "attachment":
+        filename = part.get_filename() or "attachment"
+        extension = os.path.splitext(filename)[1].lower()
+        supported = {".pdf", ".docx", ".txt", ".xlsx", ".eml"}
+        if extension not in supported:
+            return ""
+
+        data = part.get_payload(decode=True) or b""
+        with tempfile.NamedTemporaryFile(suffix=extension, delete=False) as temporary:
+            temporary.write(data)
+            temporary_path = temporary.name
+        try:
+            return f"\n--- ATTACHMENT: {filename} ---\n{extract_text_from_file(temporary_path)}"
+        except Exception:
+            return ""
+        finally:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+
+    if part.is_multipart():
+        return "\n".join(_extract_email_part(child) for child in part.iter_parts())
+    if part.get_content_type() == "text/plain":
+        return part.get_content()
+    return ""
+
+
+def extract_text_from_eml(path: str) -> str:
+    """Extract EML headers, body text, and supported quotation attachments."""
+    with open(path, "rb") as file_obj:
+        message = BytesParser(policy=policy.default).parse(file_obj)
+
+    parts = []
+    for header in ("subject", "from", "to", "date"):
+        value = message.get(header)
+        if value:
+            parts.append(f"{header.title()}: {value}")
+    parts.append(_extract_email_part(message))
+    return "\n".join(part for part in parts if part).strip()
+
+
 def extract_text_from_msg(path: str) -> str:
     """
     Extract text from an Outlook .msg email file.
@@ -192,7 +321,6 @@ def extract_text_from_msg(path: str) -> str:
     except ImportError:
         raise ValueError("extract-msg is not installed. Run: pip install extract-msg")
 
-    import tempfile
     with extract_msg.Message(path) as msg:
         parts = []
 
@@ -209,7 +337,7 @@ def extract_text_from_msg(path: str) -> str:
         for att in (msg.attachments or []):
             name = att.longFilename or att.shortFilename or ""
             ext = os.path.splitext(name)[1].lower()
-            if ext not in (".pdf", ".docx", ".txt"):
+            if ext not in (".pdf", ".docx", ".txt", ".xlsx", ".eml"):
                 continue
             tmp_path = None
             try:
@@ -239,8 +367,12 @@ def extract_text_from_file(path: str) -> str:
         return extract_text_from_txt(path)
     if ext == ".docx":
         return extract_text_from_docx(path)
+    if ext == ".xlsx":
+        return extract_text_from_xlsx(path)
     if ext == ".msg":
         return extract_text_from_msg(path)
+    if ext == ".eml":
+        return extract_text_from_eml(path)
     raise ValueError(f"Unsupported file type: {ext}")
 
 
@@ -256,7 +388,7 @@ def summarize_text_with_gpt(combined_text: str) -> str:
        2) Payment Terms & Quotation Validity
     """
     prompt = f"""
-You are an intelligent business assistant specialised in supplier quotations.
+You are an evidence-first quotation analyst. Use only facts explicitly present in the supplied documents.
 
 ------------------------------------------------------------------------------
 ### 1  📦 Material & Supplier Comparison (Unit Price only)
@@ -271,6 +403,11 @@ Table rules
 • Columns **exactly**:  
   `SN | Altered Material Name | Material description | <Supplier-1> Unit Price | <Supplier-2> Unit Price | … | Source file(s)`  
 • If a supplier did **not** quote that item → Unit Price `N/A`.  
+• Never invent, estimate, calculate, or copy a price from another item. Preserve unclear
+  values as written or use `N/A`.
+• Match items only when description, dimensions, grade, packaging, and unit are compatible.
+  Similar names are not enough; keep potentially different items as separate rows.
+• Do not assume a filename is the supplier name unless the document identifies the supplier.
 • No totals, no VAT, no grand totals, no commentary.  
 • Output valid markdown.
 
@@ -293,12 +430,17 @@ Copy wording exactly; leave blank if absent.
                 "role": "system",
                 "content": 
                 (
-                "You are a document-summariser. Your job is to summarise supplier "
+                "You are an evidence-first document summariser. Extract quotation facts exactly "
+                "as written and never invent prices, units, suppliers, terms, or dates. "
                 "quotations into markdown tables. For every material in a row, list the unit "
                 "price/Rate quoted by each supplier across the documents. "
                 "Documents may be bilingual (Arabic + English) or contain pipe-separated rows — treat them all as valid input. "
                 "Preserve currency symbols and units (SAR, USD, pcs, sheets, m², kg, etc.) exactly as written. "
                 "Make sure ALL materials are listed even if not comparable across suppliers. "
+                "If documents conflict, preserve both values and their source files. "
+                "Identify the supplier from each document header, footer, logo, address, email, "
+                "or quotation metadata. Repeat the supplier name on every payment row. Never "
+                "use a quotation number as the supplier name when a company name is available. "
                 "No extra prose — output only the required tables."
                 )
             },
@@ -313,7 +455,7 @@ Copy wording exactly; leave blank if absent.
             chunks.append(delta)
     print()  # newline after stream ends
     print(f"[LLM] Response received in {time.perf_counter() - _t0:.2f}s")
-    return unwrap_llm_text("".join(chunks))
+    return clean_model_markdown(unwrap_llm_text("".join(chunks)))
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -340,11 +482,13 @@ def markdown_table_to_df(md_block: str) -> pd.DataFrame:
         return [c.strip() for c in row.split("|")]
 
     header = split_row(lines[0])
+    if len(header) < 2 or not any("supplier" in c.lower() for c in header):
+        raise ValueError("Invalid quotation table header.")
     # Skip the separator row (---|---) which is always the 2nd line
     body   = [split_row(r) for r in lines[2:] if r.strip()]
 
     # Pad rows that are shorter than header with empty strings
-    fixed_body = [r + [""] * (len(header) - len(r)) if len(r) < len(header) else r
+    fixed_body = [r[:len(header)] + [""] * (len(header) - len(r))
                   for r in body]
 
     return pd.DataFrame(fixed_body, columns=header)
@@ -360,7 +504,7 @@ def run_local_test():
         log("❌ Folder not found.")
         return
 
-    EXT = {".pdf", ".docx", ".txt"}
+    EXT = {".pdf", ".docx", ".txt", ".xlsx", ".msg", ".eml"}
     files = [f for f in os.listdir(folder) if os.path.splitext(f)[1].lower() in EXT]
     if not files:
         log("⚠️ No supported files in folder.")
