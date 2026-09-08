@@ -482,7 +482,7 @@ def markdown_table_to_df(md_block: str) -> pd.DataFrame:
         return [c.strip() for c in row.split("|")]
 
     header = split_row(lines[0])
-    if len(header) < 2 or not any("supplier" in c.lower() for c in header):
+    if len(header) < 2:
         raise ValueError("Invalid quotation table header.")
     # Skip the separator row (---|---) which is always the 2nd line
     body   = [split_row(r) for r in lines[2:] if r.strip()]
