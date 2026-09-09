@@ -10,6 +10,7 @@ from llm_client import get_chat_model, get_llm_client, unwrap_llm_text
 
 
 def verify_url(url: str) -> bool:
+    print("FUNCTION: verify_url")
     """Verify that a candidate website is reachable before exporting it."""
     try:
         with httpx.Client(timeout=8.0, follow_redirects=True) as http:
@@ -20,6 +21,7 @@ def verify_url(url: str) -> bool:
 
 
 def generate_supplier_summary_excel(items: List[dict], output_file: str):
+    print("FUNCTION: generate_supplier_summary_excel")
     client = get_llm_client()
 
     wb = openpyxl.Workbook()

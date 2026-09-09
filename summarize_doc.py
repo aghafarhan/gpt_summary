@@ -34,6 +34,7 @@ def log(*args, **kwargs):
 
 
 def clean_model_markdown(text: str) -> str:
+    log("FUNCTION: clean_model_markdown")
     """Remove server-log lines if terminal output was mixed into model text."""
     kept = []
     for line in (text or "").splitlines():
@@ -45,6 +46,7 @@ def clean_model_markdown(text: str) -> str:
 
 
 def extract_document_metadata(text: str) -> dict:
+    log("FUNCTION: extract_document_metadata")
     """Extract high-value quotation metadata before the LLM compares items."""
     source = text or ""
     metadata = {
@@ -87,6 +89,7 @@ def extract_document_metadata(text: str) -> dict:
 
 
 def format_document_for_llm(filename: str, text: str) -> str:
+    log("FUNCTION: format_document_for_llm")
     metadata = extract_document_metadata(text)
     metadata_lines = "\n".join(f"{key}: {value or 'Not found'}"
                                 for key, value in metadata.items())
@@ -134,11 +137,13 @@ LONG_DIM_RE = re.compile(
 )
 
 def _fold_long_dims(m: re.Match) -> str:
+    log("FUNCTION: _fold_long_dims")
     """'18 * 122 * 244' → '18X122X244'."""
     nums = re.findall(r"\d+", m.group(0))
     return "X".join(nums)
 
 def normalise_description(line: str) -> str:
+    log("FUNCTION: normalise_description")
     """(unchanged – keeps human wording)"""
     tokens = line.strip().split()
     if tokens and CODE_RE.match(tokens[0]):
@@ -150,6 +155,7 @@ def normalise_description(line: str) -> str:
 
 
 def canonical_key(desc: str) -> str:
+    log("FUNCTION: canonical_key")
     desc = desc.upper()
     desc = re.sub(r"[,/]+", " ", desc)
 
@@ -173,6 +179,7 @@ def canonical_key(desc: str) -> str:
 
 
 def extract_text_from_pdf(path: str) -> str:
+    log("FUNCTION: extract_text_from_pdf")
     """
     Per-page extraction strategy:
     1. Extract free text with pdfplumber (normalised through canonical_key).
@@ -227,6 +234,7 @@ def extract_text_from_pdf(path: str) -> str:
 
 
 def extract_text_from_txt(path: str) -> str:
+    log("FUNCTION: extract_text_from_txt")
     for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
         try:
             with open(path, "r", encoding=encoding) as file_obj:
@@ -237,6 +245,7 @@ def extract_text_from_txt(path: str) -> str:
 
 
 def extract_text_from_docx(path: str) -> str:
+    log("FUNCTION: extract_text_from_docx")
     document = Document(path)
     parts = []
     # Paragraphs
@@ -253,6 +262,7 @@ def extract_text_from_docx(path: str) -> str:
 
 
 def extract_text_from_xlsx(path: str) -> str:
+    log("FUNCTION: extract_text_from_xlsx")
     """Extract worksheet names and rows while preserving column boundaries."""
     workbook = load_workbook(path, read_only=True, data_only=True)
     parts = []
@@ -269,6 +279,7 @@ def extract_text_from_xlsx(path: str) -> str:
 
 
 def _extract_email_part(part) -> str:
+    log("FUNCTION: _extract_email_part")
     if part.get_content_disposition() == "attachment":
         filename = part.get_filename() or "attachment"
         extension = os.path.splitext(filename)[1].lower()
@@ -298,6 +309,7 @@ def _extract_email_part(part) -> str:
 
 
 def extract_text_from_eml(path: str) -> str:
+    log("FUNCTION: extract_text_from_eml")
     """Extract EML headers, body text, and supported quotation attachments."""
     with open(path, "rb") as file_obj:
         message = BytesParser(policy=policy.default).parse(file_obj)
@@ -312,6 +324,7 @@ def extract_text_from_eml(path: str) -> str:
 
 
 def extract_text_from_msg(path: str) -> str:
+    log("FUNCTION: extract_text_from_msg")
     """
     Extract text from an Outlook .msg email file.
     Also recursively extracts any PDF / DOCX / TXT attachments embedded in the email.
@@ -360,6 +373,7 @@ def extract_text_from_msg(path: str) -> str:
 
 
 def extract_text_from_file(path: str) -> str:
+    log("FUNCTION: extract_text_from_file")
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
         return extract_text_from_pdf(path)
@@ -381,6 +395,7 @@ def extract_text_from_file(path: str) -> str:
 # ────────────────────────────────────────────────────────────────────────────────
 
 def summarize_text_with_gpt(combined_text: str) -> str:
+    log("FUNCTION: summarize_text_with_gpt")
     """
     Feed the concatenated raw text from all quotation files to GPT and
     receive two markdown tables:
@@ -463,6 +478,7 @@ Copy wording exactly; leave blank if absent.
 # ────────────────────────────────────────────────────────────────────────────────
 
 def markdown_table_to_df(md_block: str) -> pd.DataFrame:
+    log("FUNCTION: markdown_table_to_df")
     """
     Convert a pipe-delimited markdown table to DataFrame **without**
     discarding empty cells.  Leading / trailing pipes are trimmed once so
@@ -499,6 +515,7 @@ def markdown_table_to_df(md_block: str) -> pd.DataFrame:
 # ───────────────────────────────────────────────────────────────────────────────────────────
 
 def run_local_test():
+    log("FUNCTION: run_local_test")
     folder = input("📁 Folder with quotation files: ").strip()
     if not os.path.isdir(folder):
         log("❌ Folder not found.")

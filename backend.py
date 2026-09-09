@@ -19,6 +19,7 @@ from summarize_doc import (
 from supplier_summary import generate_supplier_summary_excel
 from models import ProcurementRequest
 from punch_ai_risk import build_insights, Payload as RiskPayload
+from structured_quotations import analyze_files, to_markdown
 
 
 TEMP_DIR = "temp_files"
@@ -50,6 +51,7 @@ app.add_middleware(
 
 @app.get("/health")
 def health_check():
+    logger.info("FUNCTION: health_check")
     return {"status": "ok"}
     
   
@@ -64,7 +66,12 @@ class ChatQuery(BaseModel):
 
 @app.post("/summarize-quotations/")
 async def summarize_quotations(files: list[UploadFile] = File(...)):
+    logger.info("FUNCTION: summarize_quotations")
     combined_text = ""
+    saved_files = []
+    direct_file_types = {".pdf", ".docx"}
+    direct_files = []
+    extracted_documents = []
     logger.info(f"📥 Received {len(files)} file(s)")
 
     for uploaded_file in files:
@@ -77,21 +84,53 @@ async def summarize_quotations(files: list[UploadFile] = File(...)):
             shutil.copyfileobj(uploaded_file.file, f)
 
         try:
+            saved_files.append((temp_path, uploaded_file.filename or "quotation"))
             txt = extract_text_from_file(temp_path)
             combined_text += format_document_for_llm(uploaded_file.filename, txt)
+            if extension in direct_file_types:
+                direct_files.append((temp_path, uploaded_file.filename or "quotation"))
+                logger.info("Document %s: original file queued for GPT (%d locally extracted chars available as fallback)",
+                            uploaded_file.filename, len(txt))
+            else:
+                extracted_documents.append((uploaded_file.filename or "quotation", txt))
+                logger.info("Document %s: extracted locally and queued as text for GPT (%d chars)",
+                            uploaded_file.filename, len(txt))
         except ValueError as exc:
+            for path, _ in saved_files:
+                if os.path.exists(path):
+                    os.remove(path)
             return JSONResponse({"error": str(exc)}, status_code=400)
-        finally:
-            os.remove(temp_path)
+        except Exception:
+            for path, _ in saved_files:
+                if os.path.exists(path):
+                    os.remove(path)
+            raise
 
-    if not combined_text.strip():
+    if not saved_files:
         return JSONResponse(
             {"error": "No supported quotation files were uploaded."},
             status_code=400
         )
 
     logger.info("🧠 Sending text to GPT summarizer")
-    md_summary = summarize_text_with_gpt(combined_text)
+    if direct_files:
+        try:
+            logger.info("Sending original PDF/DOCX files plus extracted documents to GPT")
+            logger.info("Original files sent: %s", [name for _, name in direct_files])
+            logger.info("Locally extracted files sent as text: %s", [name for name, _ in extracted_documents])
+            structured = analyze_files(direct_files, extracted_documents)
+            md_summary = to_markdown(structured)
+        except Exception:
+            logger.exception("Direct file analysis failed; using extracted-text fallback")
+            md_summary = summarize_text_with_gpt(combined_text)
+    else:
+        logger.info("Using local extraction for mixed/native file types")
+        logger.info("Locally extracted files sent to GPT as combined text: %s",
+                    [name for name, _ in extracted_documents])
+        md_summary = summarize_text_with_gpt(combined_text)
+    for path, _ in saved_files:
+        if os.path.exists(path):
+            os.remove(path)
 
 
     # Convert markdown tables to JSON
@@ -113,6 +152,7 @@ async def summarize_quotations(files: list[UploadFile] = File(...)):
     
 @app.post("/generate-supplier-summary/")
 async def generate_supplier_summary(data: ProcurementRequest):
+    logger.info("FUNCTION: generate_supplier_summary")
     items = [{"item_name": item.item_name} for item in data.items]
 
 
@@ -134,6 +174,7 @@ async def generate_supplier_summary(data: ProcurementRequest):
     
 @app.post("/chat-about-quotation/")
 async def chat_about_quotation(payload: ChatQuery):
+    logger.info("FUNCTION: chat_about_quotation")
     prompt = f"""You are a intelligent Purchase Officer assistant. Given this quotation summary:\n\n{payload.context}\n\nAnswer this question:\n{payload.query}"""
     
     try:
@@ -147,5 +188,6 @@ async def chat_about_quotation(payload: ChatQuery):
 
 @app.post("/punch-ai-risk/")
 async def summarize_ai_risk(payload: RiskPayload):
+    logger.info("FUNCTION: summarize_ai_risk")
     return build_insights(payload)
 
