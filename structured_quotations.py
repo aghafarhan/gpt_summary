@@ -2,7 +2,7 @@
 import json
 from llm_client import get_chat_model, get_llm_client
 
-MODEL = "gpt-5.6"
+MODEL = "gpt-5-nano"
 
 SCHEMA = {
     "type": "object", "additionalProperties": False,

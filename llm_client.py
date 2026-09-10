@@ -10,7 +10,7 @@ from openai import OpenAI
 
 load_dotenv()
 
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gpt-5-nano"
 _PLACEHOLDER_API_KEY = "not-needed"
 _CHAT_SUFFIXES = ("/chat/completions", "/completions")
 
