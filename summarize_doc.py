@@ -6,6 +6,7 @@ and summarizing them using an OpenAI-compatible model.
 import os
 import re
 import time
+import logging
 import email
 from email import policy
 from email.parser import BytesParser
@@ -24,6 +25,8 @@ from openpyxl.styles import PatternFill
 from dotenv import load_dotenv
 load_dotenv()
 from llm_client import get_chat_model, get_llm_client, unwrap_llm_text
+
+logger = logging.getLogger(__name__)
 
 
 VERBOSE_MODE = __name__ == "__main__"  # True only if run locall
@@ -102,7 +105,7 @@ def format_document_for_llm(filename: str, text: str) -> str:
 # 1.  Initialise the OpenAI-compatible client
 # ────────────────────────────────────────────────────────────────────────────────
 
-MODEL = "gpt-5.6"
+MODEL = "grok-4.6"
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -440,6 +443,7 @@ Copy wording exactly; leave blank if absent.
     stream = get_llm_client().chat.completions.create(
         model=get_chat_model(MODEL),
         stream=True,
+        stream_options={"include_usage": True},
         messages=[
             {
                 "role": "system",
@@ -463,13 +467,22 @@ Copy wording exactly; leave blank if absent.
         ],
     )
     chunks = []
+    usage = None
     for chunk in stream:
+        if getattr(chunk, "usage", None):
+            usage = chunk.usage
+        if not getattr(chunk, "choices", None):
+            continue
         delta = chunk.choices[0].delta.content or ""
         if delta:
             print(delta, end="", flush=True)
             chunks.append(delta)
     print()  # newline after stream ends
     print(f"[LLM] Response received in {time.perf_counter() - _t0:.2f}s")
+    if usage:
+        logger.info("LLM TOKENS: model=%s input=%s output=%s total=%s",
+                    get_chat_model(MODEL), getattr(usage, "prompt_tokens", "?"),
+                    getattr(usage, "completion_tokens", "?"), getattr(usage, "total_tokens", "?"))
     return clean_model_markdown(unwrap_llm_text("".join(chunks)))
 
 

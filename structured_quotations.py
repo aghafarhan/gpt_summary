@@ -1,8 +1,10 @@
 """Direct document analysis with a structured response and legacy rendering."""
 import json
+import logging
 from llm_client import get_chat_model, get_llm_client
 
-MODEL = "gpt-5-nano"
+MODEL = "grok-4.6"
+logger = logging.getLogger(__name__)
 
 SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -43,15 +45,23 @@ def analyze_files(paths, extracted_documents=None):
         for path, filename in paths:
             content.append({"type": "input_text", "text": f"--- ORIGINAL DOCUMENT: {filename} ---"})
             with open(path, "rb") as stream:
-                uploaded = client.files.create(file=(filename, stream), purpose="user_data")
+                uploaded = client.files.create(file=(filename, stream), purpose="assistants")
             ids.append(uploaded.id)
             content.append({"type": "input_file", "file_id": uploaded.id})
         for filename, text in extracted_documents or []:
             content.append({"type": "input_text", "text": f"--- EXTRACTED DOCUMENT: {filename} ---\n{text}"})
+        selected_model = get_chat_model(MODEL)
+        logger.info("LLM FUNCTION: client.responses.create model=%s direct_files=%s extracted_files=%s",
+                    selected_model, [name for _, name in paths], [name for name, _ in extracted_documents or []])
         response = client.responses.create(
-            model=get_chat_model(MODEL), input=[{"role": "user", "content": content}],
+            model=selected_model, input=[{"role": "user", "content": content}],
             text={"format": {"type": "json_schema", "name": "quotation_summary", "strict": True, "schema": SCHEMA}},
         )
+        usage = getattr(response, "usage", None)
+        if usage:
+            logger.info("LLM TOKENS: model=%s input=%s output=%s total=%s",
+                        selected_model, getattr(usage, "input_tokens", "?"),
+                        getattr(usage, "output_tokens", "?"), getattr(usage, "total_tokens", "?"))
         data = json.loads(response.output_text)
         allowed = {filename for _, filename in paths}
         allowed.update(filename for filename, _ in extracted_documents or [])
