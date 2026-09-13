@@ -89,14 +89,15 @@ def analyze_files(paths, extracted_documents=None):
 def to_markdown(data):
     print("FUNCTION: to_markdown")
     suppliers = [s for s in data.get("suppliers", []) if s.get("name")]
-    names = [s["name"] for s in suppliers]
+    names = list(dict.fromkeys(s["name"] for s in suppliers))
     headers = ["SN", "Altered Material Name", "Material description"] + [f"{n} Unit Price" for n in names] + ["Source file(s)"]
-    rows = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
+    separator = ["---:"] + ["---" for _ in headers[1:]]
+    rows = ["| " + " | ".join(headers) + " |", "|" + "|".join(separator) + "|"]
     for number, item in enumerate(data.get("items", []), 1):
         prices = {p.get("supplier"): p.get("value", "N/A") for p in item.get("prices", [])}
         values = [str(number), item.get("name", ""), item.get("description", "")]
         values += [prices.get(name, "N/A") or "N/A" for name in names]
-        values.append("; ".join(item.get("source_files", [])))
+        values.append("<br>".join(item.get("source_files", [])))
         rows.append("| " + " | ".join(values) + " |")
     rows += ["", "| Supplier Name | Payment Terms | Quotation Validity |", "|---|---|---|"]
     rows += [f"| {s['name']} | {s.get('payment_terms', '')} | {s.get('quotation_validity', '')} |" for s in suppliers]

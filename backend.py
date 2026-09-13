@@ -113,6 +113,7 @@ async def summarize_quotations(files: list[UploadFile] = File(...)):
         )
 
     logger.info("🧠 Sending text to GPT summarizer")
+    logger.info("Preparing document content for LLM analysis")
     if direct_files:
         try:
             logger.info("Sending original PDF/DOCX files plus extracted documents to GPT")
