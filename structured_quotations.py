@@ -62,7 +62,9 @@ def analyze_files(paths, extracted_documents=None):
             logger.info("LLM TOKENS: model=%s input=%s output=%s total=%s",
                         selected_model, getattr(usage, "input_tokens", "?"),
                         getattr(usage, "output_tokens", "?"), getattr(usage, "total_tokens", "?"))
-        data = json.loads(response.output_text)
+        raw_output = response.output_text or ""
+        logger.info("LLM DIRECT RESPONSE:\n%s", raw_output)
+        data = json.loads(raw_output)
         allowed = {filename for _, filename in paths}
         allowed.update(filename for filename, _ in extracted_documents or [])
         for item in data.get("items", []):

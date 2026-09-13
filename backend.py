@@ -183,7 +183,9 @@ async def chat_about_quotation(payload: ChatQuery):
             model=get_chat_model("gpt-5.4"),
             messages=[{"role": "user", "content": prompt}]
         )
-        return {"answer": unwrap_llm_text(response.choices[0].message.content)}
+        answer = unwrap_llm_text(response.choices[0].message.content)
+        logger.info("LLM CHAT ABOUT QUOTATION RESPONSE:\n%s", answer)
+        return {"answer": answer}
     except Exception as e:
         return {"error": str(e)}   
 

@@ -483,7 +483,9 @@ Copy wording exactly; leave blank if absent.
         logger.info("LLM TOKENS: model=%s input=%s output=%s total=%s",
                     get_chat_model(MODEL), getattr(usage, "prompt_tokens", "?"),
                     getattr(usage, "completion_tokens", "?"), getattr(usage, "total_tokens", "?"))
-    return clean_model_markdown(unwrap_llm_text("".join(chunks)))
+    raw_response = unwrap_llm_text("".join(chunks))
+    logger.info("LLM CHAT COMPLETIONS RESPONSE:\n%s", raw_response)
+    return clean_model_markdown(raw_response)
 
 
 # ────────────────────────────────────────────────────────────────────────────────
