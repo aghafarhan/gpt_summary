@@ -443,6 +443,7 @@ Copy wording exactly; leave blank if absent.
     stream = get_llm_client().chat.completions.create(
         model=get_chat_model(MODEL),
         stream=True,
+        reasoning_effort="medium",
         stream_options={"include_usage": True},
         messages=[
             {
