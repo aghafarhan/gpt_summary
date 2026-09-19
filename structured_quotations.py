@@ -55,7 +55,7 @@ def analyze_files(paths, extracted_documents=None):
                     selected_model, [name for _, name in paths], [name for name, _ in extracted_documents or []])
         response = client.responses.create(
             model=selected_model, input=[{"role": "user", "content": content}],
-            reasoning={"effort": "medium"},
+            reasoning={"effort": "low"},
             text={"format": {"type": "json_schema", "name": "quotation_summary", "strict": True, "schema": SCHEMA}},
         )
         usage = getattr(response, "usage", None)
